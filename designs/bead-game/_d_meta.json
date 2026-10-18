@@ -1,0 +1,43 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "拼豆操作页": {
+      "versions": [
+        {
+          "path": "index.html",
+          "createdAt": "2026-10-17T15:30:21.768Z",
+          "status": "approved",
+          "subtitle": "已确认配色：奶油白、浅暖粉与草莓红",
+          "viewport": {
+            "width": 390,
+            "height": 844
+          }
+        },
+        {
+          "path": "soft-v1.html",
+          "createdAt": "2026-10-17T15:40:35.467Z",
+          "status": "changes-requested",
+          "subtitle": "浅色版本留档"
+        },
+        {
+          "path": "yellow-green-v2.html",
+          "createdAt": "2026-10-17T15:42:43.534Z",
+          "status": "changes-requested",
+          "subtitle": "黄绿版本留档"
+        },
+        {
+          "path": "strawberry-v3.html",
+          "createdAt": "2026-10-17T15:44:24.660Z",
+          "status": "changes-requested",
+          "subtitle": "深粉版本留档"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-10-17T15:30:21.771Z",
+  "updatedAt": "2026-10-17T15:46:44.094Z",
+  "title": "豆日常拼豆操作原型",
+  "prompt": "制作微信拼豆闯关游戏的操作页面原型，首关为有细节的草莓蛋糕，支持放豆和完成流程。"
+}

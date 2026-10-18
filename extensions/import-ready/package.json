@@ -1,0 +1,13 @@
+{
+  "name": "import-ready",
+  "version": "0.1.0",
+  "package_version": 2,
+  "description": "Allow lazy asset import handlers to finish registering before a cold CLI build",
+  "author": "Bead Studio",
+  "contributions": {
+    "asset-db": {
+      "script": "./asset-db.js",
+      "global-hook": ["beforePreStart"]
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "bead-studio",
+  "version": "3.8.8",
+  "private": true,
+  "description": "豆日常：草莓奶油蛋糕首关",
+  "creator": {
+    "version": "3.8.8"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "validate:levels": "node --import tsx scripts/validate-levels.ts",
+    "test": "vitest",
+    "lint": "tsc --noEmit -p tsconfig.check.json",
+    "check": "pnpm typecheck && pnpm validate:levels && pnpm test --run",
+    "build:web": "node scripts/build.mjs web",
+    "build:wechat": "node scripts/build.mjs wechat"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5"
+  },
+  "packageManager": "pnpm@11.25.0",
+  "uuid": "783d7b8b-4b79-4bdf-8fdc-9625d4692b33"
+}

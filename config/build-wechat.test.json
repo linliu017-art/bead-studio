@@ -1,0 +1,19 @@
+{
+  "platform": "wechatgame",
+  "debug": false,
+  "startScene": "01549166-4e95-4d3f-b749-20c5a9aaf681",
+  "scenes": [
+    {
+      "url": "db://assets/scenes/Game.scene",
+      "uuid": "01549166-4e95-4d3f-b749-20c5a9aaf681"
+    }
+  ],
+  "outputName": "wechatgame",
+  "name": "bead-studio",
+  "packages": {
+    "wechatgame": {
+      "appid": "wx6ac3f5090a6b99c5",
+      "orientation": "portrait"
+    }
+  }
+}

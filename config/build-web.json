@@ -1,0 +1,20 @@
+{
+  "platform": "web-mobile",
+  "debug": true,
+  "startScene": "01549166-4e95-4d3f-b749-20c5a9aaf681",
+  "scenes": [
+    {
+      "url": "db://assets/scenes/Game.scene",
+      "uuid": "01549166-4e95-4d3f-b749-20c5a9aaf681"
+    }
+  ],
+  "outputName": "first-level",
+  "name": "bead-studio",
+  "packages": {
+    "web-mobile": {
+      "orientation": "portrait",
+      "embedWebDebugger": false,
+      "useWebGPU": false
+    }
+  }
+}

@@ -1,0 +1,21 @@
+node_modules/
+library/
+local/
+temp/
+profiles/
+build/
+.DS_Store
+*.log
+.tools/
+logs/
+
+# Local dependency store and credentials
+.pnpm-store/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor service prompts are local UI state
+/settings/v2/packages/information.json
