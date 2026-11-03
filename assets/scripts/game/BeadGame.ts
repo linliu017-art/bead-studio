@@ -1,11 +1,12 @@
 import {
   _decorator, Component, Node, Canvas, UITransform, Camera, Color, Graphics,
-  Label, Layers, view, ResolutionPolicy, resources, JsonAsset, SpriteFrame, Sprite,
+  Label, Layers, view, ResolutionPolicy, resources, JsonAsset, SpriteFrame, Sprite, Mask, ScrollView,
   EventTouch, EventMouse, EventKeyboard, input, Input, KeyCode, sys, game, Game, profiler, AudioSource, AudioClip, BlockInputEvents, Vec3, tween, Tween,
 } from 'cc';
 import { validateLevel, LevelDefinition } from '../core/Level';
 import { PlaySession } from '../core/Session';
 import { PlayerRecord, SaveRepository, newRecord, collectionCandidate } from '../core/SaveRepository';
+import { levelStoragePrefix, levelUnlocked, loadLevel } from '../core/LevelAccess';
 import { Point, GestureState, BoardPanGesture, traverseGrid, centeredUiPoint } from '../core/Geometry';
 import { PlatformStorage } from '../platform/Platform';
 import { BoardView } from './BoardView';
@@ -17,8 +18,8 @@ interface Action { title:string; run:()=>void; primary?:boolean }
 @ccclass('BeadGame')
 export class BeadGame extends Component {
   private root!:Node;private hud!:Node;private overlay!:Node;private worldHeight=844;
-  private level!:LevelDefinition;private session!:PlaySession;private record!:PlayerRecord;private repo!:SaveRepository;
-  private storage=new PlatformStorage();private board!:BoardView;private bead!:SpriteFrame;private melted!:SpriteFrame;private finished!:SpriteFrame;
+  private levels:LevelDefinition[]=[];private level!:LevelDefinition;private session!:PlaySession;private record!:PlayerRecord;private repo!:SaveRepository;
+  private storage=new PlatformStorage();private board!:BoardView;private bead!:SpriteFrame;private melted!:SpriteFrame;private finished!:SpriteFrame;private finishedFrames:SpriteFrame[]=[];
   private guide!:Label;private progress!:Label;private counter!:Label;private actionText!:Label;private boardSizeText!:Label;
   private steps:Label[]=[];private stepDots:Graphics[]=[];private palette:Node[]=[];private paletteCounts:Label[]=[];private paletteFrames:Graphics[]=[];
   private paletteStock:Node[][]=[];private paletteGlass:Graphics[]=[];
@@ -31,7 +32,7 @@ export class BeadGame extends Component {
   private pinch:{distance:number;zoom:number;mid:Point;offset:Point}|null=null;
   private activeModal=false;private hintTarget:number|null=null;private lastHintTarget:number|null=null;private dirty=false;private elapsed=0;private ready=false;private blocked=false;private saveFailed=false;private wasHidden=false;private collectedBusy=false;
   private audio!:AudioSource;private clip:AudioClip|null=null;private lastSound=0;private lastActionEnabled=false;private stageTop=96;private stageHeight=390;private boardCenterY=0;private bottom=0;
-  private toastNode:Node|null=null;
+  private toastNode:Node|null=null;private screen: 'home'|'levels'|'collection'|'game'='game';
   private tweezers:TweezersCursor|null=null;private mousePoint:Point|null=null;
   start():void {
     profiler.hideStats();
@@ -46,23 +47,28 @@ export class BeadGame extends Component {
     this.audio=this.node.addComponent(AudioSource);
     resources.load('audio/bead',AudioClip,(err,clip)=>{if(!err)this.clip=clip;});
     this.label(this.hud,'正在打开你的拼豆桌…',195,this.worldHeight/2,18,theme.text,340);
-    Promise.all([this.load<JsonAsset>('levels/dessert-001',JsonAsset),this.load<SpriteFrame>('art/bead/spriteFrame',SpriteFrame),this.load<SpriteFrame>('art/melted/spriteFrame',SpriteFrame),this.load<SpriteFrame>('art/finished-cake/spriteFrame',SpriteFrame)]).then(([asset,bead,melted,finished])=>{
-      this.level=validateLevel(asset.json);this.bead=bead;this.melted=melted;this.finished=finished;
-      this.repo=new SaveRepository(this.storage,this.level);
+    Promise.all([Promise.all(['dessert-001','dessert-002','dessert-003','dessert-004','dessert-005','dessert-006'].map(id=>this.load<JsonAsset>('levels/'+id,JsonAsset))),this.load<SpriteFrame>('art/bead/spriteFrame',SpriteFrame),this.load<SpriteFrame>('art/melted/spriteFrame',SpriteFrame),Promise.all(['finished-cake','finished-soda','finished-pudding','finished-pancake','finished-sandwich','finished-cat-cup'].map(name=>this.load<SpriteFrame>('art/'+name+'/spriteFrame',SpriteFrame)))]).then(([asset,bead,melted,finished])=>{
+      this.levels=asset.map(item=>validateLevel(item.json));this.level=this.levels[0];try{const recent=this.storage.get('bead-studio-recent-level');const index=this.levels.findIndex(level=>level.id===recent);if(index>0&&levelUnlocked(this.levels,index,this.storage))this.level=this.levels[index];}catch{}this.bead=bead;this.melted=melted;this.finishedFrames=finished;this.finished=finished[0];
+      this.repo=new SaveRepository(this.storage,this.level,levelStoragePrefix(this.level));
       const loaded=this.repo.load();
       this.record=('record' in loaded)?loaded.record:newRecord(this.level);
       this.session=PlaySession.restore(this.level,this.record.session);this.openDrawerColor=this.session.selectedColor;
       this.build();this.ready=true;this.refresh();
       if(loaded.kind==='invalid'||loaded.kind==='storage-error'){this.blocked=true;this.recovery(loaded.kind);}
-      else if(loaded.kind==='backup')this.toast('已从备用记录恢复进度');
-      else if(loaded.kind==='empty'){this.dirty=true;this.flush();this.toast('先选一种颜色，点按或滑动放豆');}
+      else { if(loaded.kind==='empty'){this.dirty=true;this.flush();} this.showHome(); if(loaded.kind==='backup')this.toast('已从备用记录恢复进度'); }
     }).catch((error:unknown)=>{console.error("First level initialization failed",error);this.hud.destroyAllChildren();this.label(this.hud,'作品暂时没打开',195,this.worldHeight/2-25,22,theme.text,330);this.button(this.hud,'重试',195,this.worldHeight/2+35,180,46,()=>{this.ready=false;this.startAgain();},true);});
     game.on(Game.EVENT_HIDE,this.onHide,this);game.on(Game.EVENT_SHOW,this.onShow,this);view.on('canvas-resize',this.onResize,this);
     input.on(Input.EventType.KEY_DOWN,this.keyDown,this);input.on(Input.EventType.KEY_UP,this.keyUp,this);
     input.on(Input.EventType.MOUSE_MOVE,this.mouseMove,this);input.on(Input.EventType.MOUSE_UP,this.mouseUp,this);
     input.on(Input.EventType.MOUSE_DOWN,this.trackMouse,this);
   }
-  private startAgain():void {resources.load('levels/dessert-001',JsonAsset,(e,a)=>{if(e){this.toast('读取失败，请稍后再试');return;}this.level=validateLevel(a.json);this.repo=new SaveRepository(this.storage,this.level);const r=this.repo.load();this.record='record'in r?r.record:newRecord(this.level);this.session=PlaySession.restore(this.level,this.record.session);this.openDrawerColor=this.session.selectedColor;this.load<SpriteFrame>('art/bead/spriteFrame',SpriteFrame).then(b=>{this.bead=b;return Promise.all([this.load<SpriteFrame>('art/melted/spriteFrame',SpriteFrame),this.load<SpriteFrame>('art/finished-cake/spriteFrame',SpriteFrame)]);}).then(([m,f])=>{this.melted=m;this.finished=f;this.build();this.ready=true;this.refresh();if(r.kind==='invalid'||r.kind==='storage-error'){this.blocked=true;this.recovery(r.kind);}}).catch(()=>this.toast('资源读取失败，请重试'));});}
+  private startAgain():void {
+    Promise.all([Promise.all(['dessert-001','dessert-002','dessert-003','dessert-004','dessert-005','dessert-006'].map(id=>this.load<JsonAsset>('levels/'+id,JsonAsset))),this.load<SpriteFrame>('art/bead/spriteFrame',SpriteFrame),this.load<SpriteFrame>('art/melted/spriteFrame',SpriteFrame),Promise.all(['finished-cake','finished-soda','finished-pudding','finished-pancake','finished-sandwich','finished-cat-cup'].map(name=>this.load<SpriteFrame>('art/'+name+'/spriteFrame',SpriteFrame)))]).then(([assets,bead,melted,finished])=>{
+      this.levels=assets.map(item=>validateLevel(item.json));this.level=this.levels[0];this.bead=bead;this.melted=melted;this.finishedFrames=finished;this.finished=finished[0];
+      this.repo=new SaveRepository(this.storage,this.level,levelStoragePrefix(this.level));const r=this.repo.load();this.record='record'in r?r.record:newRecord(this.level);this.session=PlaySession.restore(this.level,this.record.session);this.openDrawerColor=this.session.selectedColor;this.build();this.ready=true;this.refresh();
+      if(r.kind==='invalid'||r.kind==='storage-error'){this.blocked=true;this.recovery(r.kind);}else this.showHome();
+    }).catch(()=>this.toast('资源读取失败，请重试'));
+  }
   private load<T>(path:string,type:typeof JsonAsset|typeof SpriteFrame):Promise<T>{return new Promise((resolve,reject)=>{resources.load(path,type as typeof JsonAsset,(err,asset)=>{if(err)reject(err);else resolve(asset as unknown as T);});});}
   private container(name:string,parent:Node):Node {const n=new Node(name);parent.addChild(n);n.layer=Layers.Enum.UI_2D;return n;}
   private position(n:Node,x:number,y:number):void {n.setPosition(x-195,this.worldHeight/2-y,0);}
@@ -89,7 +95,7 @@ export class BeadGame extends Component {
     const insets=this.storage.safeInsets(390);this.bottom=insets.bottom;
     const top=insets.top;this.stageTop=top+96;this.stageHeight=Math.max(160,H-this.stageTop-178-this.bottom);
     this.button(this.hud,'‹',37,top+29,38,38,()=>this.showExit());
-    this.label(this.hud,'01关 '+this.level.title,195,top+29,18,theme.text,252,true);
+    this.label(this.hud,String(this.level.order).padStart(2,'0')+'关 '+this.level.title,195,top+29,18,theme.text,252,true);
     this.button(this.hud,'···',350,top+29,44,34,()=>this.showSettings());
     ['拼豆','熨烫','收藏'].forEach((text,i)=>{
       const x=110+i*84;const dot=this.panel(this.hud,x-19,top+70,19,19,theme.pale,undefined,10);this.stepDots.push(dot);
@@ -100,7 +106,7 @@ export class BeadGame extends Component {
     const workHeight=H-this.bottom-68-this.stageTop,workCenter=this.stageTop+workHeight/2;
     this.panel(this.hud,195,workCenter+3,370,workHeight,theme.shadow,undefined,21);
     this.panel(this.hud,195,workCenter,370,workHeight,theme.board,theme.boardEdge,21);
-    this.board=new BoardView(this.hud,this.level,this.bead,this.melted,this.finished);
+    this.board=new BoardView(this.hud,this.level,this.bead,this.melted,this.finishedFrames[this.level.order-1]);
     this.board.layout(0,H/2-centerY,358,boardHeight);
     this.boardSizeText=this.label(this.hud,`${this.level.width}×${this.level.height}`,338,this.stageTop+this.stageHeight-15,10,theme.muted,52,true);
     this.shade=this.panel(this.hud,195,centerY,350,boardHeight-6,'#fff6e379',undefined,8);this.shade.node.active=false;
@@ -288,7 +294,7 @@ export class BeadGame extends Component {
   private collect():void {
     if(this.collectedBusy)return;this.collectedBusy=true;this.refresh();
     const candidate=collectionCandidate(this.record,this.session);candidate.tutorialStep=3;
-    if(this.repo.save(candidate)){this.record=candidate;this.session.phase='collected';this.dirty=false;this.saveFailed=false;this.refresh();this.shade.node.active=true;tween(this.shade.node).by(.4,{position:new Vec3(390,35,0),angle:-12}).call(()=>{this.shade.node.active=false;this.position(this.shade.node,195,this.boardCenterY);this.shade.node.angle=0;}).start();this.toast('揭开烘焙纸，草莓蛋糕完成了！');this.scheduleOnce(()=>this.showCollection(),.65);}
+    if(this.repo.save(candidate)){this.record=candidate;this.session.phase='collected';this.dirty=false;this.saveFailed=false;this.refresh();this.shade.node.active=true;tween(this.shade.node).by(.4,{position:new Vec3(390,35,0),angle:-12}).call(()=>{this.shade.node.active=false;this.position(this.shade.node,195,this.boardCenterY);this.shade.node.angle=0;}).start();this.toast('揭开烘焙纸，'+this.level.title+'完成了！');this.scheduleOnce(()=>this.showCollection(),.65);}
     else{this.saveFailed=true;this.toast('领取未保存，请重试');}
     this.collectedBusy=false;this.refresh();if(this.session.phase==='collected')this.shade.node.active=true;
   }
@@ -298,11 +304,92 @@ export class BeadGame extends Component {
     {title:'重新制作这件作品',run:()=>this.confirmRestart()},
     {title:'继续制作',run:()=>this.closeModal(),primary:true},
   ]);}
-  private confirmRestart():void {this.modal('重新制作草莓蛋糕？','当前制作进度会清空，已收藏的成品会保留。',[{title:'从第一颗重新开始',run:()=>{const next=newRecord(this.level);next.completed=[...this.record.completed];next.collected=[...this.record.collected];next.sound=this.record.sound;next.tutorialStep=this.record.tutorialStep;if(!this.repo.save(next)){this.toast('保存失败，原进度已保留');return;}this.record=next;this.session=new PlaySession(this.level);this.openDrawerColor=this.session.selectedColor;this.clearHint(true);this.dirty=false;this.saveFailed=false;this.closeModal();this.board.resetViewport();this.clearInput();this.refresh();},primary:true},{title:'继续当前作品',run:()=>this.closeModal()}]);}
-  private showExit():void {this.modal('草莓奶油蛋糕',`第 01 关 · ${this.session.phase==='collected'?'已完成':Math.floor(this.session.filled.size/this.session.total*100)+'% 已拼好'}\n当前版本提供这一关完整体验。`,[{title:'查看我的作品',run:()=>this.showCollection()},{title:'继续当前作品',run:()=>this.closeModal(),primary:true}]);}
+  private confirmRestart():void {this.modal('重新制作'+this.level.title+'？','当前制作进度会清空，已收藏的成品会保留。',[{title:'从第一颗重新开始',run:()=>{const next=newRecord(this.level);next.completed=[...this.record.completed];next.collected=[...this.record.collected];next.sound=this.record.sound;next.tutorialStep=this.record.tutorialStep;if(!this.repo.save(next)){this.toast('保存失败，原进度已保留');return;}this.record=next;this.session=new PlaySession(this.level);this.openDrawerColor=this.session.selectedColor;this.clearHint(true);this.dirty=false;this.saveFailed=false;this.closeModal();this.board.resetViewport();this.clearInput();this.refresh();},primary:true},{title:'继续当前作品',run:()=>this.closeModal()}]);}
+  private showExit():void {this.modal('返回关卡列表？','当前进度会保存在本机。',[{title:'返回关卡列表',run:()=>{this.flush();if(this.saveFailed){this.toast('保存失败，请重试后再返回');return;}this.showHome();},primary:true},{title:'继续当前作品',run:()=>this.closeModal()}]);}
+  private showHome():void {this.showLevels();}
+  private enterGame():void {this.screen='game';this.closeModal();this.hud.active=true;this.refresh();}
+  private showNavigationPage(screen:'levels'|'collection',title:string,subtitle:string,back:()=>void=()=>this.showHome()):{top:number;compact:boolean} {
+    this.clearInput();this.board?.stopFocus();this.tweezers?.hide();this.closeModal();this.screen=screen;this.activeModal=true;this.hud.active=false;
+    const H=this.worldHeight,top=this.storage.safeInsets(390).top,compact=H<700;
+    this.panel(this.overlay,195,H/2,390,H,theme.background,undefined,0).node.addComponent(BlockInputEvents);
+    if(screen!=='levels')this.button(this.overlay,'‹',37,top+28,38,38,back);
+    this.label(this.overlay,title,195,top+29,19,theme.text,260,true);
+    this.label(this.overlay,subtitle,195,top+(compact?55:75),11,theme.muted,340);
+    return {top,compact};
+  }
+  private activateLevel(index:number):void {
+    if(!levelUnlocked(this.levels,index,this.storage)){this.toast('先完成上一关再解锁');return;}
+    this.flush();if(this.saveFailed){this.toast('保存失败，请重试');return;}
+    const next=this.levels[index],repo=new SaveRepository(this.storage,next,levelStoragePrefix(next)),loaded=repo.load();
+    if(loaded.kind==='invalid'||loaded.kind==='storage-error'){this.toast('该关存档暂时无法读取，原记录已保留');return;}
+    try{this.storage.set('bead-studio-recent-level',next.id);}catch{this.toast('无法保存最近关卡，请重试');return;}
+    this.level=next;this.repo=repo;this.record='record' in loaded?loaded.record:newRecord(next);this.session=PlaySession.restore(next,this.record.session);this.openDrawerColor=this.session.selectedColor;
+    this.screen='game';this.hud.active=true;this.build();this.ready=true;this.refresh();
+    if(loaded.kind==='backup')this.toast('已从备用记录恢复进度');
+  }
+  /** Content uses a top-left style coordinate system, while Cocos keeps the view centered. */
+  private scrollContent(top:number,contentHeight:number):Node {
+    const height=Math.max(80,this.worldHeight-top-this.bottom-12);
+    const viewport=this.container('ScrollViewport',this.overlay);this.position(viewport,195,top+height/2);
+    viewport.addComponent(UITransform).setContentSize(390,height);viewport.addComponent(Mask).type=Mask.Type.GRAPHICS_RECT;
+    const content=this.container('ScrollContent',viewport),transform=content.addComponent(UITransform);
+    transform.setAnchorPoint(.5,1);transform.setContentSize(390,Math.max(height,contentHeight));content.setPosition(0,height/2);
+    const scroll=viewport.addComponent(ScrollView);scroll.content=content;scroll.horizontal=false;scroll.vertical=true;scroll.cancelInnerEvents=true;
+    return content;
+  }
+  private showLevels():void {
+    const {top,compact}=this.showNavigationPage('levels','甜品时光','选择作品 · 按顺序解锁');
+    this.button(this.overlay,'作品集',337,top+28,74,36,()=>this.showShelf());
+    this.button(this.overlay,this.record.sound?'音效开':'音效关',53,top+28,74,36,()=>{this.record.sound=!this.record.sound;this.dirty=true;this.flush();this.showLevels();if(this.saveFailed)this.toast('保存失败，请重试');});
+    const height=compact?125:170,step=height+14,rows=Math.ceil(this.levels.length/2),viewTop=top+(compact?70:96);
+    const content=this.scrollContent(viewTop,rows*step+12),origin=this.worldHeight/2;
+    this.levels.forEach((level,index)=>{
+      const x=109+(index%2)*172,y=origin+height/2+Math.floor(index/2)*step;
+      const unlocked=levelUnlocked(this.levels,index,this.storage),loaded=loadLevel(this.storage,level),record='record' in loaded?loaded.record:null;
+      const status=!unlocked?'完成上一关解锁':record?.completed.includes(level.id)?'已完成':record?.session.filled.length?`进行中 ${record.session.filled.length}/${level.cells.filter(Boolean).length}`:'可以开始';
+      const card=this.panel(content,x,y,166,height,theme.board,theme.boardEdge,18).node;
+      card.on(Node.EventType.TOUCH_START,()=>{});
+      card.on(Node.EventType.TOUCH_END,(event:EventTouch)=>{event.propagationStopped=true;this.activateLevel(index);});
+      const art=this.container('LevelPreview',content);this.position(art,x,y-(compact?22:24));
+      FusedArtwork.create(art,level,compact?3.3:Math.min(5,140/level.width,110/level.height),this.finishedFrames[index]).showCells(null);
+      this.label(content,`${String(index+1).padStart(2,'0')}  ${level.title}`,x,y+(compact?28:48),12,theme.text,154,true);
+      this.label(content,status,x,y+(compact?47:68),10,theme.muted,154);
+    });
+  }
+  private showShelf():void {
+    const {top,compact}=this.showNavigationPage('collection','我的作品集','甜品与饮食 · 收藏的作品');
+    const saved=this.levels.map((level,index)=>({level,index,loaded:loadLevel(this.storage,level)})).filter(item=>'record' in item.loaded&&item.loaded.record.collected.includes(item.level.id));
+    if(!saved.length){
+      const y=top+(compact?105:230);
+      this.panel(this.overlay,195,y,350,compact?70:200,theme.board,theme.boardEdge,20);
+      this.label(this.overlay,'还没有收藏的作品',195,y-(compact?8:15),16,theme.text,300,true);
+      this.label(this.overlay,'完成拼豆、熨烫和揭纸后，作品会出现在这里',195,y+(compact?13:18),11,theme.muted,320);
+      return;
+    }
+    const height=compact?125:170,step=height+14,rows=Math.ceil(saved.length/2),viewTop=top+(compact?70:96);
+    const content=this.scrollContent(viewTop,rows*step+12),origin=this.worldHeight/2;
+    saved.forEach(({level,index},position)=>{
+      const x=109+(position%2)*172,y=origin+height/2+Math.floor(position/2)*step;
+      const card=this.panel(content,x,y,166,height,theme.board,theme.boardEdge,18).node;
+      card.on(Node.EventType.TOUCH_START,()=>{});
+      card.on(Node.EventType.TOUCH_END,(event:EventTouch)=>{event.propagationStopped=true;this.showShelfDetail(index);});
+      const art=this.container('ShelfArtwork',content);this.position(art,x,y-(compact?15:15));
+      FusedArtwork.create(art,level,compact?3.3:Math.min(5,140/level.width,120/level.height),this.finishedFrames[index]).showCells(null);
+      this.label(content,level.title,x,y+(compact?45:62),12,theme.text,154,true);
+    });
+  }
+  private showShelfDetail(index:number):void {
+    const level=this.levels[index];const {top,compact}=this.showNavigationPage('collection',level.title,'已收藏 · 甜品与饮食',()=>this.showShelf());
+    const y=top+(compact?100:230);this.panel(this.overlay,195,y,350,compact?65:245,theme.board,theme.boardEdge,20);
+    if(!compact){const art=this.container('ShelfDetailArtwork',this.overlay);this.position(art,195,y);FusedArtwork.create(art,level,Math.min(11,350/level.width,(index===0?195:280)/level.height),this.finishedFrames[index]).showCells(null);}
+    else this.label(this.overlay,level.title+' · 已收藏',195,y,14,theme.text,320,true);
+    const by=top+(compact?156:380);
+    this.button(this.overlay,'再做一次',195,by,338,44,()=>{this.activateLevel(index);if(this.screen==='game')this.confirmRestart();},true);
+    this.button(this.overlay,'返回作品集',195,by+55,338,40,()=>this.showShelf());
+  }
   private showCollection():void {
     if(!this.record.collected.includes(this.level.id)){this.modal('我的作品集','第一件作品正在慢慢成形。\n完成拼豆和熨烫后，把草莓蛋糕摆上展架。',[{title:'继续制作',run:()=>this.closeModal(),primary:true}]);return;}
-    this.modal('草莓奶油蛋糕','✓ 已收藏 · 甜品时光第 01 件',[{title:'再做一次',run:()=>this.confirmRestart()},{title:'回到作品',run:()=>this.closeModal(),primary:true}],true);
+    this.modal(this.level.title,'✓ 已收藏 · 甜品时光第 '+String(this.level.order).padStart(2,'0')+' 件',[{title:'再做一次',run:()=>this.confirmRestart()},{title:'返回关卡列表',run:()=>this.showLevels()},{title:'回到作品',run:()=>this.closeModal(),primary:true}],true);
   }
   private modal(title:string,message:string,actions:Action[],artwork=false):void {
     this.closeModal();this.clearInput();this.flush();this.activeModal=true;this.tweezers?.hide();const H=this.worldHeight;
@@ -316,14 +403,14 @@ export class BeadGame extends Component {
     // The sheet catches its own blank areas so only the outside backdrop dismisses it.
     const sheet=this.panel(this.overlay,195,top+height/2,390,height,theme.surface,undefined,25).node;sheet.addComponent(BlockInputEvents);
     this.label(this.overlay,title,195,top+37,22,theme.text,330,true);this.label(this.overlay,message,195,top+83,12,theme.muted,335);
-    if(artwork){const art=this.container('Artwork',this.overlay);this.position(art,195,top+218);const u=Math.min(7.5,280/this.level.width,220/this.level.height);FusedArtwork.create(art,this.level,u,this.finished).showCells(null);}
+    if(artwork){const art=this.container('Artwork',this.overlay);this.position(art,195,top+185);const u=Math.min(11,360/this.level.width,(this.level.order===1?165:290)/this.level.height);FusedArtwork.create(art,this.level,u,this.finishedFrames[this.level.order-1]).showCells(null);}
     const actionStart=H-this.bottom-25-(actions.length-.5)*53;
     actions.forEach((a,i)=>this.button(this.overlay,a.title,195,actionStart+i*53,338,44,a.run,a.primary));
   }
   private closeModal():void {if(this.overlay)this.overlay.destroyAllChildren();this.activeModal=false;this.clearInput();}
   private recovery(kind:string):void {this.modal('进度暂时无法恢复',kind==='invalid'?'本机记录损坏或图纸版本不一致，原始记录仍保留。':'本机存储暂不可用，请重试。',[
     {title:'重试读取记录',run:()=>{const r=this.repo.load();if('record'in r){this.record=r.record;this.session=PlaySession.restore(this.level,this.record.session);this.openDrawerColor=this.session.selectedColor;this.blocked=false;this.closeModal();this.refresh();}else this.toast('暂未恢复，请稍后重试');}},
-    {title:'确认新开一局',run:()=>{this.modal('保留旧记录，新开一局？','会先备份当前记录，备份失败时不清空。',[{title:'备份并重新开始',run:()=>{try{const backup=[this.storage.get('bead-studio-game-v1-0'),this.storage.get('bead-studio-game-v1-1')];this.storage.set('bead-studio-game-v1-recovery',JSON.stringify(backup));const r=newRecord(this.level);if(!this.repo.save(r))throw new Error('save');this.record=r;this.session=new PlaySession(this.level);this.openDrawerColor=this.session.selectedColor;this.blocked=false;this.closeModal();this.refresh();}catch{this.toast('存储失败，旧记录已保留');}},primary:true},{title:'返回',run:()=>this.recovery(kind)}]);}},
+    {title:'确认新开一局',run:()=>{this.modal('保留旧记录，新开一局？','会先备份当前记录，备份失败时不清空。',[{title:'备份并重新开始',run:()=>{try{const backup=[this.storage.get(levelStoragePrefix(this.level)+'-0'),this.storage.get(levelStoragePrefix(this.level)+'-1')];this.storage.set(levelStoragePrefix(this.level)+'-recovery',JSON.stringify(backup));const r=newRecord(this.level);if(!this.repo.save(r))throw new Error('save');this.record=r;this.session=new PlaySession(this.level);this.openDrawerColor=this.session.selectedColor;this.blocked=false;this.closeModal();this.refresh();}catch{this.toast('存储失败，旧记录已保留');}},primary:true},{title:'返回',run:()=>this.recovery(kind)}]);}},
   ]);}
   private toast(text:string):void {if(this.toastNode)this.toastNode.destroy();const y=this.stageTop+this.stageHeight-24;const n=this.panel(this.overlay,195,y,Math.min(356,text.length*12+30),38,'#59413eef',undefined,13).node;this.toastNode=n;this.label(n,text,195,this.worldHeight/2,11,'#fffaf1',330);this.scheduleOnce(()=>{if(n.isValid)n.destroy();if(this.toastNode===n)this.toastNode=null;},2.6);}
   private flush():void {if(!this.ready||this.blocked||!this.dirty)return;this.record.session=this.session.serialize();if(this.repo.save(this.record)){this.dirty=false;this.saveFailed=false;}else{if(!this.saveFailed)this.toast('进度保存失败，请在设置中重试');this.saveFailed=true;}this.elapsed=0;}
@@ -340,6 +427,6 @@ export class BeadGame extends Component {
   update(dt:number):void {this.refreshTweezers();if(this.ready&&this.board.focusing)this.refreshViewportHint();if(this.ready&&this.dirty&&!this.wasHidden){this.elapsed+=dt;if(this.elapsed>=.2)this.flush();}}
   private onHide():void {this.wasHidden=true;this.mousePoint=null;this.tweezers?.hide();this.panModifier=false;this.clearInput();this.audio?.stop();this.flush();}
   private onShow():void {this.wasHidden=false;this.clearInput();if(this.ready)this.refresh();}
-  private onResize():void {if(this.ready){this.clearInput();this.flush();this.build();this.refresh();}}
+  private onResize():void {if(this.ready){const screen=this.screen;this.clearInput();this.flush();this.hud.active=true;this.build();this.refresh();if(screen==='home')this.showHome();else if(screen==='levels')this.showLevels();else if(screen==='collection')this.showShelf();}}
   onDestroy():void {this.paletteDrawerStates.forEach(state=>Tween.stopAllByTarget(state));this.tweezers?.destroy();this.tweezers=null;this.board?.stopFocus();this.clearHint();this.flush();game.off(Game.EVENT_HIDE,this.onHide,this);game.off(Game.EVENT_SHOW,this.onShow,this);view.off('canvas-resize',this.onResize,this);input.off(Input.EventType.KEY_DOWN,this.keyDown,this);input.off(Input.EventType.KEY_UP,this.keyUp,this);input.off(Input.EventType.MOUSE_DOWN,this.trackMouse,this);input.off(Input.EventType.MOUSE_MOVE,this.mouseMove,this);input.off(Input.EventType.MOUSE_UP,this.mouseUp,this);}
 }

@@ -14,7 +14,7 @@ export class PlaySession {
   selectedColor: number | null;
   constructor(readonly level: LevelDefinition) {
     this.targets = level.cells.flatMap((id, i) => id ? [i] : []);
-    this.selectedColor = level.palette[0].id;
+    this.selectedColor = level.palette.find(color => level.cells.includes(color.id))!.id;
   }
   get total(): number { return this.targets.length; }
   remaining(colorId = this.selectedColor): number { return this.targets.filter(i => this.level.cells[i] === colorId && !this.filled.has(i)).length; }
