@@ -5,6 +5,9 @@ import { LoadResult, SaveRepository, StoragePort } from './SaveRepository';
 export function levelStoragePrefix(level: LevelDefinition): string {
   return level.order === 1 ? 'bead-studio-game-v1' : `bead-studio-game-v1-${level.id}`;
 }
+export function sampleStoragePrefix(level: LevelDefinition): string {
+  return `bead-studio-dev-v1-${level.id}`;
+}
 export function loadLevel(storage: StoragePort, level: LevelDefinition): LoadResult {
   return new SaveRepository(storage, level, levelStoragePrefix(level)).load();
 }

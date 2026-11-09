@@ -52,35 +52,46 @@ export class BoardView {
     this.pegs.node.active=session.phase!=='collected';
     this.fused.showCells(session.phase==='collected'?null:session.heated);
     const focus=hintTarget!==null&&!session.filled.has(hintTarget)?hintTarget:null;
-    for(const [i,sprite] of this.pieces){const done=session.filled.has(i),melted=session.heated.has(i)||session.phase==='collected',selected=this.level.cells[i]===session.selectedColor;
-      const status=`${done}-${melted}-${selected}-${i===focus}`;
+    const selectedColor = session.phase === 'placing'
+      ? this.level.palette.find(entry => entry.id === session.selectedColor)
+      : undefined;
+    const targets = this.targets;
+    targets.clear();
+    if (selectedColor) {
+      targets.strokeColor = color('#914c60');
+      targets.fillColor = color(selectedColor.hex, 72);
+      targets.lineWidth = this.unit * .11;
+    }
+    for(const [i,sprite] of this.pieces){
+      const done = session.filled.has(i);
+      const melted = session.heated.has(i) || session.phase === 'collected';
+      const activeTarget = !done && this.level.cells[i] === selectedColor?.id;
+      if (activeTarget) {
+        const {x,y} = sprite.node.position;
+        const size = this.unit * .78;
+        targets.roundRect(x-size/2, y-size/2, size, size, this.unit*.16);
+      }
+      const muted = !done && selectedColor !== undefined;
+      const status = `${done}-${melted}-${activeTarget}-${muted}`;
       if(this.statuses.get(i)===status)continue;
       const prior=this.statuses.get(i);this.statuses.set(i,status);
-      sprite.node.active=!melted;
+      sprite.node.active = !melted && !activeTarget;
       sprite.spriteFrame=this.beadFrame;
       const tint=color(this.level.palette.find(c=>c.id===this.level.cells[i])!.hex);
       if(!done&&!melted){
-        // Keep target colors readable; outlines separate active empty positions from placed beads.
+        // Keep the rest of the pattern readable behind the active slots.
         const gray=tint.r*.299+tint.g*.587+tint.b*.114;
-        const saturation=selected?.65:.5;
-        tint.r=Math.round((gray+(tint.r-gray)*saturation)*.88+255*.12);
-        tint.g=Math.round((gray+(tint.g-gray)*saturation)*.88+248*.12);
-        tint.b=Math.round((gray+(tint.b-gray)*saturation)*.88+233*.12);
-        tint.a=i===focus?220:selected?195:125;
+        tint.r=Math.round((gray+(tint.r-gray)*.5)*.88+255*.12);
+        tint.g=Math.round((gray+(tint.g-gray)*.5)*.88+248*.12);
+        tint.b=Math.round((gray+(tint.b-gray)*.5)*.88+233*.12);
+        tint.a=muted?105:125;
       }
       sprite.color=tint;
       if(done&&prior?.startsWith('false')){sprite.node.setScale(.65,.65,1);tween(sprite.node).to(.12,{scale:new Vec3(1,1,1)}).start();}
     }
-    const g=this.targets;g.clear();
-    if(session.phase==='placing'&&session.selectedColor!==null){
-      const edge=color(this.level.palette.find(c=>c.id===session.selectedColor)!.hex,190);
-      edge.r=Math.round(edge.r*.58);edge.g=Math.round(edge.g*.58);edge.b=Math.round(edge.b*.58);
-      g.strokeColor=edge;g.lineWidth=Math.max(.6,this.unit*.055);
-      for(const [i,sprite] of this.pieces){
-        if(!session.filled.has(i)&&this.level.cells[i]===session.selectedColor){
-          const p=sprite.node.position;g.circle(p.x,p.y,this.unit*.465);g.stroke();
-        }
-      }
+    if (selectedColor) {
+      targets.fill();
+      targets.stroke();
     }
     this.showMarker(focus);
   }

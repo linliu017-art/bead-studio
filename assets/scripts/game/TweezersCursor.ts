@@ -1,4 +1,4 @@
-import { game, Graphics, Node, Sprite, SpriteFrame, Tween, tween, UITransform } from 'cc';
+import { game, Graphics, Node, screen, Sprite, SpriteFrame, Tween, tween, UITransform, view } from 'cc';
 import { Point } from '../core/Geometry';
 import { color } from './Theme';
 
@@ -14,14 +14,26 @@ export class TweezersCursor {
   private animation:Tween<{open:number;lift:number}>|null=null;
   private canvas=game.canvas;
   private previousCursor:string|null=null;
-  constructor(parent:Node,frame:SpriteFrame,private leave:()=>void) {
+  constructor(parent:Node,frame:SpriteFrame,private move:(point:Point)=>void,private leave:()=>void) {
     this.node=new Node('BeadTweezersCursor');parent.addChild(this.node);this.node.layer=parent.layer;
     const beadNode=new Node('HeldBead');this.node.addChild(beadNode);beadNode.layer=parent.layer;
     beadNode.addComponent(UITransform);this.bead=beadNode.addComponent(Sprite);this.bead.spriteFrame=frame;this.bead.sizeMode=Sprite.SizeMode.CUSTOM;
     const arms=new Node('PastelPlasticTweezers');this.node.addChild(arms);arms.layer=parent.layer;this.tool=arms.addComponent(Graphics);
     this.node.active=false;
+    // The color tray's scroll view can swallow mouse moves during scene dispatch.
+    this.canvas?.addEventListener?.('mousemove',this.onMouseMove);
     this.canvas?.addEventListener?.('mouseleave',this.leave);
   }
+  private onMouseMove = (event: MouseEvent): void => {
+    if (!this.canvas) return;
+    const bounds = this.canvas.getBoundingClientRect();
+    const viewport = view.getViewportRect();
+    const ratio = screen.devicePixelRatio;
+    this.move({
+      x: ((event.clientX - bounds.left) * ratio - viewport.x) / view.getScaleX(),
+      y: ((bounds.bottom - event.clientY) * ratio - viewport.y) / view.getScaleY(),
+    });
+  };
   show(point:Point,hex:string,size:number,zoom:number,loaded:boolean):void {
     // Keep the jaw geometry in unzoomed coordinates; scale the complete tool and bead together.
     this.node.setPosition(point.x,point.y,0);this.node.setScale(zoom,zoom,1);this.node.active=true;
@@ -78,5 +90,10 @@ export class TweezersCursor {
     this.bead.node.getComponent(UITransform)!.setContentSize(this.size,this.size);
     this.bead.node.setPosition(0,lift,0);
   }
-  destroy():void {this.hide();this.canvas?.removeEventListener?.('mouseleave',this.leave);this.node.destroy();}
+  destroy():void {
+    this.hide();
+    this.canvas?.removeEventListener?.('mousemove',this.onMouseMove);
+    this.canvas?.removeEventListener?.('mouseleave',this.leave);
+    this.node.destroy();
+  }
 }
