@@ -12,11 +12,11 @@ export class FusedArtwork extends Component {
   private surface!:ReturnType<typeof fusedSurface>;
   private lastCount=-2;
   private surfaceNode!:Node;private shadowNode!:Node;private finishedNode:Node|null=null;
-  private readonly density=24;
-  static create(parent:Node,level:LevelDefinition,unit:number,finishedFrame?:SpriteFrame):FusedArtwork {
+  private density=24;
+  static create(parent:Node,level:LevelDefinition,unit:number,finishedFrame?:SpriteFrame,density=24):FusedArtwork {
     const node=new Node('FusedArtwork');node.layer=parent.layer;parent.addChild(node);
     node.addComponent(UITransform);
-    const artwork=node.addComponent(FusedArtwork);artwork.level=level;artwork.surface=fusedSurface(level,artwork.density);
+    const artwork=node.addComponent(FusedArtwork);artwork.level=level;artwork.density=density;artwork.surface=fusedSurface(level,density);
     artwork.texture=new Texture2D();artwork.texture.reset({width:artwork.surface.width,height:artwork.surface.height,format:Texture2D.PixelFormat.RGBA8888});
     artwork.texture.setFilters(Texture2D.Filter.LINEAR,Texture2D.Filter.LINEAR);
     artwork.frame=new SpriteFrame();artwork.frame.texture=artwork.texture;
