@@ -1,7 +1,10 @@
-import { existsSync, readFileSync, mkdirSync, createWriteStream } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, createWriteStream, writeFileSync, copyFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+
+import { tsImport } from 'tsx/esm/api';
+const { brandWebPage } = await tsImport('./webBranding.ts', import.meta.url);
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const target = process.argv[2];
@@ -28,6 +31,15 @@ child.on('close', code => {
     const scene = JSON.parse(readFileSync(resolve(root, 'assets/scenes/Game.scene.meta'), 'utf8'));
     if (scene.importer !== 'scene') throw new Error('场景导入器异常。');
     if (target === 'wechat' && !existsSync(resolve(output, 'game.js'))) throw new Error('微信入口缺失。');
+    if (target === 'web') {
+      copyFileSync(resolve(root,'assets/resources/art/pixel-world.png'),resolve(output,'pixel-world.png'));
+      copyFileSync(resolve(root,'assets/resources/art/pixel-title.png'),resolve(output,'pixel-title.png'));
+      copyFileSync(resolve(root,'assets/resources/art/pixel-world-wide.png'),resolve(output,'pixel-world-wide.png'));
+      copyFileSync(resolve(root,'assets/resources/fonts/ZCOOLKuaiLe-Regular.ttf'),resolve(output,'q-font.ttf'));
+      copyFileSync(resolve(root,'assets/resources/fonts/OFL.txt'),resolve(output,'OFL-ZCOOL.txt'));
+      const entry = resolve(output, 'index.html');
+      writeFileSync(entry, brandWebPage(readFileSync(entry, 'utf8')));
+    }
     console.log(`已导出 ${output}\n资源完整性检查通过；请继续执行实际试玩。`);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 });

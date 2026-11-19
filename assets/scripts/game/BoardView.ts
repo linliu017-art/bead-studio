@@ -2,7 +2,7 @@ import { Node, UITransform, Graphics, Sprite, SpriteFrame, Mask, Vec3, tween, Tw
 import { LevelDefinition } from '../core/Level';
 import { PlaySession } from '../core/Session';
 import { Point, viewportForCell } from '../core/Geometry';
-import { color, theme } from './Theme';
+import { color, craftTheme as theme } from './Theme';
 import { FusedArtwork } from './FusedArtwork';
 export class BoardView {
   readonly frame: Node;

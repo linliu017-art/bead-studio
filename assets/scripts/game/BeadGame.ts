@@ -1,22 +1,26 @@
 import {
   _decorator, Component, Node, Canvas, UITransform, Camera, Color, Graphics,
-  Label, Layers, view, ResolutionPolicy, resources, JsonAsset, SpriteFrame, Sprite, Mask, ScrollView,
+  Label, Layers, view, ResolutionPolicy, resources, JsonAsset, SpriteFrame, Sprite, Mask, ScrollView, Font,
   EventTouch, EventMouse, EventKeyboard, input, Input, KeyCode, sys, game, Game, profiler, AudioSource, AudioClip, BlockInputEvents, Vec2, Vec3, tween, Tween,
 } from 'cc';
 import { validateLevel, LevelDefinition } from '../core/Level';
-import { ImagePixels, PatternOptions, defaultPatternOptions, imageToLevel } from '../core/ImagePattern';
+import { ImagePixels, PatternOptions, defaultPatternOptions, patternBoardSizes, imageToLevel } from '../core/ImagePattern';
+import { patternPrintDocument, BEAD_PITCH_MM } from '../core/PatternPrint';
 import { PersonalPatterns, personalStoragePrefix } from '../core/PersonalPatterns';
 import { PlaySession } from '../core/Session';
 import { PlayerRecord, SaveRepository, newRecord, collectionCandidate } from '../core/SaveRepository';
 import { levelStoragePrefix, levelUnlocked, loadLevel, sampleStoragePrefix } from '../core/LevelAccess';
+import { summarizeHomeProgress } from '../core/HomeProgress';
 import { Point, GestureState, BoardPanGesture, traverseGrid, centeredUiPoint } from '../core/Geometry';
 import { PlatformStorage } from '../platform/Platform';
 import { canPickPatternImage, pickPatternImage } from '../platform/PatternImagePicker';
+import { pixelBox, pixelStar, pixelButton } from './PixelSkin';
+import { homeLayout, coverSize } from '../core/PixelVisuals';
 import { PatternImage } from './PatternImage';
 import { BoardView } from './BoardView';
 import { FusedArtwork } from './FusedArtwork';
 import { TweezersCursor } from './TweezersCursor';
-import { color, theme } from './Theme';
+import { color, theme, craftTheme } from './Theme';
 const { ccclass }=_decorator;
 const paletteSpacing = 51.5;
 const paletteWidth = 360;
@@ -39,6 +43,10 @@ export class BeadGame extends Component {
   private patterns = new PersonalPatterns(this.storage);
   private draft?: ImageDraft;
   private pickingImage = false;
+  private wideLayout = false;
+  private worldFrame!:SpriteFrame;private wideWorldFrame!:SpriteFrame;private titleFrame!:SpriteFrame;private qFont!:Font;
+  private homeScrollOffset = 0;
+  private printPitchMm = BEAD_PITCH_MM;
   private lastFormalIndex = 0;
   private get personalMode(): boolean { return this.level?.themeId === 'personal'; }
   private get currentFinishedFrame(): SpriteFrame | undefined {
@@ -58,7 +66,7 @@ export class BeadGame extends Component {
   private pinch:{distance:number;zoom:number;mid:Point;offset:Point}|null=null;
   private activeModal=false;private hintTarget:number|null=null;private lastHintTarget:number|null=null;private dirty=false;private elapsed=0;private ready=false;private blocked=false;private saveFailed=false;private wasHidden=false;private collectedBusy=false;
   private audio!:AudioSource;private clip:AudioClip|null=null;private lastSound=0;private lastActionEnabled=false;private stageTop=96;private stageHeight=390;private boardCenterY=0;private bottom=0;
-  private toastNode:Node|null=null;private screen: 'home'|'levels'|'collection'|'patterns'|'draft'|'game'='game';
+  private toastNode:Node|null=null;private screen: 'home'|'levels'|'map'|'collection'|'patterns'|'draft'|'game'='game';
   private tweezers:TweezersCursor|null=null;private mousePoint:Point|null=null;
   start():void {
     profiler.hideStats();
@@ -68,7 +76,8 @@ export class BeadGame extends Component {
     }
     // A wide browser window still needs room for the portrait workbench.
     const wideBrowser = sys.isBrowser && window.innerWidth >= window.innerHeight;
-    view.setDesignResolutionSize(390,844,this.sampleMode||wideBrowser?ResolutionPolicy.SHOW_ALL:ResolutionPolicy.FIXED_WIDTH);
+    this.wideLayout = wideBrowser;
+    view.setDesignResolutionSize(390,844,wideBrowser?ResolutionPolicy.FIXED_HEIGHT:this.sampleMode?ResolutionPolicy.SHOW_ALL:ResolutionPolicy.FIXED_WIDTH);
     this.worldHeight=view.getVisibleSize().height;
     this.root=new Node('GameCanvas');this.node.addChild(this.root);this.root.layer=Layers.Enum.UI_2D;
     this.root.addComponent(UITransform).setContentSize(390,this.worldHeight);
@@ -90,14 +99,16 @@ export class BeadGame extends Component {
     this.loading = true;
     const levelPaths = this.sampleId ? ['samples/' + this.sampleId] :
       ['dessert-001','dessert-002','dessert-003','dessert-004','dessert-005','dessert-006'].map(id => 'levels/' + id);
-    const finishedNames = this.sampleMode ? [] :
-      ['finished-cake','finished-soda','finished-pudding','finished-pancake','finished-sandwich','finished-cat-cup'];
     try {
-      const [assets, bead, melted, finished] = await Promise.all([
+      const [assets, bead, melted, finished, world, wideWorld, title, qFont] = await Promise.all([
         Promise.all(levelPaths.map(path => this.load<JsonAsset>(path, JsonAsset))),
-        this.load<SpriteFrame>('art/bead/spriteFrame', SpriteFrame),
+        this.load<SpriteFrame>('art/bead/spriteFrame',SpriteFrame),
         this.load<SpriteFrame>('art/melted/spriteFrame', SpriteFrame),
-        Promise.all(finishedNames.map(name => this.load<SpriteFrame>('art/' + name + '/spriteFrame', SpriteFrame))),
+        Promise.all(['finished-cake','finished-soda','finished-pudding','finished-pancake','finished-sandwich','finished-cat-cup'].map(name=>this.load<SpriteFrame>('art/'+name+'/spriteFrame',SpriteFrame))),
+        this.load<SpriteFrame>('art/pixel-world/spriteFrame',SpriteFrame),
+        this.load<SpriteFrame>('art/pixel-world-wide/spriteFrame',SpriteFrame),
+        this.load<SpriteFrame>('art/pixel-title/spriteFrame',SpriteFrame),
+        this.load<Font>('fonts/ZCOOLKuaiLe-Regular',Font),
       ]);
       if (!this.isValid) return;
       this.levels = assets.map(asset => validateLevel(asset.json));
@@ -109,7 +120,7 @@ export class BeadGame extends Component {
           if (index > 0 && levelUnlocked(this.levels, index, this.storage)) this.level = this.levels[index];
         } catch { /* An unreadable preference does not prevent choosing a level. */ }
       }
-      this.bead = bead;
+      this.bead=bead;this.worldFrame=world;this.wideWorldFrame=wideWorld;this.titleFrame=title;this.qFont=qFont;
       this.melted = melted;
       this.finishedFrames = finished;
       this.lastFormalIndex = Math.max(0, this.levels.indexOf(this.level));
@@ -141,27 +152,44 @@ export class BeadGame extends Component {
       this.button(this.hud,'重试',195,this.worldHeight/2+28,130,44,()=>void this.loadGame(),true);
     } finally {
       this.loading = false;
+      // Reveal the canvas on both success and recoverable errors (the canvas owns retry).
+      if (sys.isBrowser) window.dispatchEvent(new Event('bead-game-ready'));
     }
   }
   private storagePrefix(): string {
     if (this.personalMode) return personalStoragePrefix(this.level);
     return this.sampleMode ? sampleStoragePrefix(this.level) : levelStoragePrefix(this.level);
   }
-  private load<T>(path:string,type:typeof JsonAsset|typeof SpriteFrame):Promise<T>{return new Promise((resolve,reject)=>{resources.load(path,type as typeof JsonAsset,(err,asset)=>{if(err)reject(err);else resolve(asset as unknown as T);});});}
+  private load<T>(path:string,type:typeof JsonAsset|typeof SpriteFrame|typeof Font):Promise<T>{return new Promise((resolve,reject)=>{resources.load(path,type as typeof JsonAsset,(err,asset)=>{if(err)reject(err);else resolve(asset as unknown as T);});});}
   private container(name:string,parent:Node):Node {const n=new Node(name);parent.addChild(n);n.layer=Layers.Enum.UI_2D;return n;}
   private position(n:Node,x:number,y:number):void {n.setPosition(x-195,this.worldHeight/2-y,0);}
   private panel(parent:Node,x:number,y:number,w:number,h:number,fill:string,stroke?:string,r=16):Graphics {
     const n=this.container('Surface',parent);this.position(n,x,y);n.addComponent(UITransform).setContentSize(w,h);const g=n.addComponent(Graphics);this.box(g,w,h,fill,stroke,r);return g;
   }
-  private box(g:Graphics,w:number,h:number,fill:string,stroke?:string,r=14):void {g.clear();g.fillColor=color(fill);g.roundRect(-w/2,-h/2,w,h,Math.min(r,w/2,h/2));g.fill();if(stroke){g.strokeColor=color(stroke);g.lineWidth=1;g.stroke();}}
+  private box(g:Graphics,w:number,h:number,fill:string,stroke?:string,r=14):void {
+    if(this.screen!=='game'){pixelBox(g,w,h,fill,stroke??theme.line);return;}
+    g.clear();g.fillColor=color(fill);g.roundRect(-w/2,-h/2,w,h,Math.min(r,w/2,h/2));g.fill();if(stroke){g.strokeColor=color(stroke);g.lineWidth=1;g.stroke();}
+  }
   private label(parent:Node,text:string,x:number,y:number,size=13,fill=theme.text,width=350,bold=false):Label {
-    const n=this.container('Text',parent);this.position(n,x,y);n.addComponent(UITransform).setContentSize(width,size*2.5);const l=n.addComponent(Label);l.string=text;l.fontFamily='PingFang SC';l.useSystemFont=true;l.fontSize=size;l.lineHeight=size*1.5;l.color=color(fill);l.isBold=bold;l.horizontalAlign=Label.HorizontalAlign.CENTER;l.verticalAlign=Label.VerticalAlign.CENTER;l.overflow=Label.Overflow.SHRINK;l.enableWrapText=true;return l;
+    const n=this.container('Text',parent);this.position(n,x,y);n.addComponent(UITransform).setContentSize(width,size*2.5);const l=n.addComponent(Label);l.string=text;l.fontFamily='Arial Rounded MT Bold';l.useSystemFont=true;if(this.qFont){l.font=this.qFont;l.useSystemFont=false;}l.fontSize=size;l.lineHeight=size*1.5;l.color=color(this.screen==='game'?(fill===theme.text?craftTheme.text:fill===theme.muted?craftTheme.muted:fill):fill);l.isBold=this.qFont?false:bold;l.horizontalAlign=Label.HorizontalAlign.CENTER;l.verticalAlign=Label.VerticalAlign.CENTER;l.overflow=Label.Overflow.SHRINK;l.enableWrapText=true;n.getComponent(UITransform)!.setContentSize(width,size*2.5);return l;
   }
   private button(parent:Node,text:string,x:number,y:number,w:number,h:number,run:()=>void,primary=false):{node:Node;label:Label;graphic:Graphics} {
     const n=this.container('Button',parent);this.position(n,x,y);n.addComponent(UITransform).setContentSize(w,h);
-    const g=n.addComponent(Graphics);this.box(g,w,h,primary?theme.accent:theme.pale,primary?'#bd3d55':'#e5c4b9',13);
-    const label=this.label(n,text,195,this.worldHeight/2,13,primary?'#ffffff':theme.text,w-12,true);
+    const g=n.addComponent(Graphics),craft=this.screen==='game';
+    if(craft)this.box(g,w,h,primary?craftTheme.accent:craftTheme.pale,primary?'#c94765':'#e5b7c0',13);else pixelButton(g,w,h,primary);
+    const label=this.label(n,text,195,this.worldHeight/2,craft?14:18,primary?'#fff7d9':craft?craftTheme.text:theme.text,w-14,true);
+    if(primary&&!craft){label.enableOutline=true;label.outlineColor=color('#a6333f');label.outlineWidth=1.5;}
     n.on(Node.EventType.TOUCH_END,(e:EventTouch)=>{e.propagationStopped=true;run();});return{node:n,label,graphic:g};
+  }
+  private worldBackground(parent:Node):void {
+    if(!this.worldFrame)return;
+    const visible=view.getVisibleSize(),frame=visible.width>visible.height?this.wideWorldFrame:this.worldFrame;
+    const n=this.container('PixelWorldBackground',parent);this.position(n,195,this.worldHeight/2);
+    const rect=frame.rect,size=coverSize(rect.width,rect.height,visible.width,visible.height);
+    const sprite=n.addComponent(Sprite);sprite.spriteFrame=frame;sprite.sizeMode=Sprite.SizeMode.CUSTOM;n.getComponent(UITransform)!.setContentSize(size.width,size.height);
+  }
+  private pixelHeading(parent:Node,text:string,x:number,y:number,size=20,width=300):Label {
+    const l=this.label(parent,text,x,y,size,'#fff5cb',width,true);l.enableOutline=true;l.outlineColor=color('#163479');l.outlineWidth=Math.max(2,size*.12);return l;
   }
   private build():void {
     this.tweezers?.destroy();this.tweezers=null;this.mousePoint=null;
@@ -172,31 +200,32 @@ export class BeadGame extends Component {
     this.worldHeight=view.getVisibleSize().height;const H=this.worldHeight;this.root.getComponent(UITransform)!.setContentSize(390,H);
     const insets=this.storage.safeInsets(390);this.bottom=insets.bottom;
     const top=insets.top;this.stageTop=top+96;this.stageHeight=Math.max(160,H-this.stageTop-178-this.bottom);
+    this.panel(this.hud,195,H/2,Math.max(390,view.getVisibleSize().width),H,craftTheme.background,undefined,0);
     this.button(this.hud,'‹',37,top+29,38,38,()=>this.showExit());
     const prefix = this.personalMode ? '' : this.sampleMode ? '试玩 · ' : String(this.level.order).padStart(2, '0') + '关 ';
-    this.label(this.hud,prefix+this.level.title,195,top+29,18,theme.text,252,true);
+    this.label(this.hud,prefix+this.level.title,195,top+29,18,craftTheme.text,252,true);
     this.button(this.hud,'···',350,top+29,44,34,()=>this.showSettings());
     ['拼豆','熨烫','收藏'].forEach((text,i)=>{
-      const x=110+i*84;const dot=this.panel(this.hud,x-19,top+70,19,19,theme.pale,undefined,10);this.stepDots.push(dot);
+      const x=110+i*84;const dot=this.panel(this.hud,x-19,top+70,19,19,craftTheme.pale,undefined,10);this.stepDots.push(dot);
       this.label(this.hud,String(i+1),x-19,top+70,10,'#ffffff',18,true);
-      this.steps.push(this.label(this.hud,text,x+7,top+70,11,theme.muted,48,true));
+      this.steps.push(this.label(this.hud,text,x+7,top+70,11,craftTheme.muted,48,true));
     });
     const boardTop=this.stageTop+44,boardHeight=this.stageHeight-52,centerY=boardTop+boardHeight/2;this.boardCenterY=centerY;
     const workHeight=H-this.bottom-68-this.stageTop,workCenter=this.stageTop+workHeight/2;
-    this.panel(this.hud,195,workCenter+3,370,workHeight,theme.shadow,undefined,21);
-    this.panel(this.hud,195,workCenter,370,workHeight,theme.board,theme.boardEdge,21);
+    this.panel(this.hud,195,workCenter+3,370,workHeight,craftTheme.shadow,undefined,21);
+    this.panel(this.hud,195,workCenter,370,workHeight,craftTheme.board,craftTheme.boardEdge,21);
     this.board=new BoardView(this.hud,this.level,this.bead,this.melted,this.currentFinishedFrame);
     this.board.layout(0,H/2-centerY,358,boardHeight);
-    this.boardSizeText=this.label(this.hud,`${this.level.width}×${this.level.height}`,338,this.stageTop+this.stageHeight-15,10,theme.muted,52,true);
+    this.boardSizeText=this.label(this.hud,`${this.level.width}×${this.level.height}`,338,this.stageTop+this.stageHeight-15,10,craftTheme.muted,52,true);
     this.shade=this.panel(this.hud,195,centerY,350,boardHeight-6,'#fff6e379',undefined,8);this.shade.node.active=false;
-    this.iron=this.container('Iron',this.hud);this.position(this.iron,195,centerY);const ironG=this.iron.addComponent(Graphics);this.box(ironG,54,72,'#fff8ee','#c38b79',22);ironG.strokeColor=color(theme.accent);ironG.lineWidth=7;ironG.roundRect(-10,-15,20,37,8);ironG.stroke();this.iron.active=false;
+    this.iron=this.container('Iron',this.hud);this.position(this.iron,195,centerY);const ironG=this.iron.addComponent(Graphics);this.box(ironG,54,72,'#fff8ee','#c38b79',22);ironG.strokeColor=color(craftTheme.accent);ironG.lineWidth=7;ironG.roundRect(-10,-15,20,37,8);ironG.stroke();this.iron.active=false;
     const find=this.button(this.hud,'',345,this.stageTop+22,40,36,()=>this.findRemaining());
     find.node.name='FindRemainingButton';find.label.node.destroy();find.node.getComponent(UITransform)!.setContentSize(44,44);
     const lens=this.container('MagnifierIcon',find.node).addComponent(Graphics);
-    lens.lineWidth=2.6;lens.strokeColor=color(theme.text);lens.fillColor=color('#fff8f2');
+    lens.lineWidth=2.6;lens.strokeColor=color(craftTheme.text);lens.fillColor=color('#fff8f2');
     lens.circle(-2,2,7);lens.fill();lens.stroke();
     lens.lineWidth=3;lens.moveTo(3,-3);lens.lineTo(9,-9);lens.stroke();
-    lens.fillColor=color(theme.text);lens.circle(9,-9,1.5);lens.fill();
+    lens.fillColor=color(craftTheme.text);lens.circle(9,-9,1.5);lens.fill();
     const paletteTop=H-this.bottom-207;
     const paletteParent = this.createPaletteViewport(paletteTop + 64);
     this.level.palette.forEach((c,i)=>{
@@ -233,22 +262,22 @@ export class BeadGame extends Component {
       lid.fillColor=color('#ffffff',90);lid.moveTo(-17,12);lid.lineTo(-8,12);lid.lineTo(4,28);lid.lineTo(-5,28);lid.close();lid.fill();
       lid.strokeColor=color('#c7adb1',130);lid.lineWidth=.7;lid.moveTo(-18,10);lid.lineTo(18,10);lid.stroke();
       lid.strokeColor=color('#ffffff',190);lid.lineWidth=1.5;lid.moveTo(-15,26);lid.lineTo(9,26);lid.stroke();
-      this.paletteCounts.push(this.label(n,'',195,H/2+40,9.5,theme.text,48));this.palette.push(n);
+      this.paletteCounts.push(this.label(n,'',195,H/2+40,9.5,craftTheme.text,48));this.palette.push(n);
       n.on(Node.EventType.TOUCH_END,(e:EventTouch)=>{e.propagationStopped=true;if(this.activeModal||this.blocked||!['placing','ready-to-iron'].includes(this.session.phase))return;this.openDrawerColor=this.openDrawerColor===c.id?null:c.id;this.session.selectedColor=this.openDrawerColor;this.clearHint(true);this.dirty=true;this.refresh();if(this.record.tutorialStep===0)this.record.tutorialStep=1;});
     });
     if (this.paletteScroll) {
-      this.label(this.hud,`‹ 横滑色板 · ${this.level.palette.length} 色 ›`,195,paletteTop+12,10,theme.muted,160,true);
+      this.label(this.hud,`‹ 横滑色板 · ${this.level.palette.length} 色 ›`,195,paletteTop+12,10,craftTheme.muted,160,true);
       this.revealPaletteColor();
     }
-    this.guide=this.label(this.hud,'',195,paletteTop+123,10,theme.muted,350);
+    this.guide=this.label(this.hud,'',195,paletteTop+123,10,craftTheme.muted,350);
     this.progress=this.label(this.hud,'0%',46,H-this.bottom-43,21,'#c05665',75,true);
-    this.counter=this.label(this.hud,'',150,H-this.bottom-42,10,theme.muted,140);
+    this.counter=this.label(this.hud,'',150,H-this.bottom-42,10,craftTheme.muted,140);
     this.progressGraphic=this.panel(this.hud,134,H-this.bottom-23,224,6,'#eedacf',undefined,3);
     const action=this.button(this.hud,'',315,H-this.bottom-36,112,46,()=>this.next(),true);this.actionNode=action.node;this.actionText=action.label;this.actionGraphic=action.graphic;
     this.bindBoard();
     if(sys.isBrowser&&!sys.isMobile){
       this.tweezers=new TweezersCursor(this.root,this.bead,point=>{
-        this.mousePoint=centeredUiPoint(point,390,this.worldHeight);
+        this.mousePoint=centeredUiPoint(point,view.getVisibleSize().width,this.worldHeight);
       },()=>this.clearMousePoint());
     }
   }
@@ -316,18 +345,18 @@ export class BeadGame extends Component {
   private keyDown(e:EventKeyboard):void {if(e.keyCode===KeyCode.SPACE){if(!this.panModifier)this.clearInput();this.panModifier=true;}}
   private keyUp(e:EventKeyboard):void {if(e.keyCode===KeyCode.SPACE){this.panModifier=false;if(this.gesture.mode==='panning')this.clearInput();}}
   private mouseDown(e:EventMouse):void {
-    this.mousePoint=centeredUiPoint(e.getUILocation(),390,this.worldHeight);
+    this.mousePoint=centeredUiPoint(e.getUILocation(),view.getVisibleSize().width,this.worldHeight);
     if(e.getButton()===EventMouse.BUTTON_RIGHT||e.getButton()===EventMouse.BUTTON_MIDDLE){
       // Creator dispatches a simulated touch before the mouse event, including for right click.
       // Clear that pending touch before it can place anything.
       this.clearInput();
       if(this.activeModal||this.blocked||this.session.phase!=='placing')return;
-      this.rightPanning=true;this.panDrag.start(centeredUiPoint(e.getUILocation(),390,this.worldHeight),this.board.offset);
+      this.rightPanning=true;this.panDrag.start(centeredUiPoint(e.getUILocation(),view.getVisibleSize().width,this.worldHeight),this.board.offset);
     }else {this.refreshTweezers();this.commitStart();}
   }
-  private trackMouse(e:EventMouse):void {this.mousePoint=centeredUiPoint(e.getUILocation(),390,this.worldHeight);this.refreshTweezers();}
+  private trackMouse(e:EventMouse):void {this.mousePoint=centeredUiPoint(e.getUILocation(),view.getVisibleSize().width,this.worldHeight);this.refreshTweezers();}
   private clearMousePoint():void {this.mousePoint=null;this.tweezers?.hide();}
-  private mouseMove(e:EventMouse):void {if(!this.rightPanning||this.activeModal||this.blocked)return;const offset=this.panDrag.move(centeredUiPoint(e.getUILocation(),390,this.worldHeight));if(offset)this.board.setViewport(this.board.zoom,offset);}
+  private mouseMove(e:EventMouse):void {if(!this.rightPanning||this.activeModal||this.blocked)return;const offset=this.panDrag.move(centeredUiPoint(e.getUILocation(),view.getVisibleSize().width,this.worldHeight));if(offset)this.board.setViewport(this.board.zoom,offset);}
   private mouseUp(e:EventMouse):void {this.trackMouse(e);if(this.rightPanning&&(e.getButton()===EventMouse.BUTTON_RIGHT||e.getButton()===EventMouse.BUTTON_MIDDLE))this.clearInput();}
   private commitStart():void {
     const pending=this.pendingStart;this.pendingStart=null;
@@ -335,7 +364,7 @@ export class BeadGame extends Component {
     if(this.session.phase==='ready-to-reveal'){this.next();return;}
     this.last=this.board.local(pending.point);this.apply(this.last,this.last,pending.point);
   }
-  private uiPoint(e:EventTouch):Point {const p=e.getUILocation();return centeredUiPoint(p,390,this.worldHeight);}
+  private uiPoint(e:EventTouch):Point {const p=e.getUILocation();return centeredUiPoint(p,view.getVisibleSize().width,this.worldHeight);}
   private touchStart(e:EventTouch):void {
     if(this.activeModal||this.blocked||!e.touch)return;e.propagationStopped=true;
     this.board.stopFocus();
@@ -372,8 +401,8 @@ export class BeadGame extends Component {
     if(!this.board)return;const phase=this.session.phase,placing=phase==='placing'||phase==='ready-to-iron';
     this.board.refresh(this.session,this.hintTarget);this.shade.node.active=phase==='ironing'||phase==='ready-to-reveal';this.iron.active=phase==='ironing';
     const stage=placing?0:phase==='collected'?2:1;
-    this.stepDots.forEach((g,i)=>this.box(g,19,19,i===stage?theme.accent:i<stage?'#d46c7d':'#e2c6bc',undefined,10));
-    this.steps.forEach((l,i)=>l.color=color(i===stage?theme.accent:theme.muted));
+    this.stepDots.forEach((g,i)=>this.box(g,19,19,i===stage?craftTheme.accent:i<stage?'#d46c7d':'#e2c6bc',undefined,10));
+    this.steps.forEach((l,i)=>l.color=color(i===stage?craftTheme.accent:craftTheme.muted));
     this.level.palette.forEach((c,i)=>{
       const left=this.session.remaining(c.id),selected=c.id===this.session.selectedColor;
       this.drawBeadBox(this.paletteFrames[i],this.paletteGlass[i],selected,c.hex);
@@ -382,7 +411,7 @@ export class BeadGame extends Component {
       const visible=left?Math.max(3,Math.ceil(left/total*this.paletteStock[i].length)):0;
       this.paletteStock[i].forEach((bead,j)=>bead.active=j<visible);
       this.paletteCounts[i].string=left?`${c.code} · ${left}`:'✓ 完成';
-      this.paletteCounts[i].color=color(theme.text);this.paletteCounts[i].isBold=selected;
+      this.paletteCounts[i].color=color(craftTheme.text);this.paletteCounts[i].isBold=selected;
     });
     this.guide.string=phase==='placing'?(this.record.tutorialStep<2?'选一种颜色，点按或滑动放豆':'双指缩放看细节，找一找定位剩余孔位'):phase==='ready-to-iron'?'全部拼好了，开始熨烫吧':phase==='ironing'?'拖动熨斗，覆盖整件作品':phase==='ready-to-reveal'?'点击下方按钮或棋盘，揭开烘焙纸':'';
     this.refreshViewportHint();
@@ -391,7 +420,7 @@ export class BeadGame extends Component {
     this.progressGraphic.clear();this.progressGraphic.fillColor=color('#eedacf');this.progressGraphic.roundRect(-112,-3,224,6,3);this.progressGraphic.fill();if(p){this.progressGraphic.fillColor=color('#df6d7d');this.progressGraphic.roundRect(-112,-3,Math.max(6,224*p/100),6,3);this.progressGraphic.fill();}
     this.lastActionEnabled=['ready-to-iron','ready-to-reveal','collected'].includes(phase)&&!this.collectedBusy;
     this.actionText.string=phase==='placing'?'拼完后熨烫':phase==='ready-to-iron'?'开始熨烫':phase==='ironing'?'熨烫中…':phase==='ready-to-reveal'?'揭开烘焙纸':'查看作品';
-    this.box(this.actionGraphic,112,46,this.lastActionEnabled?theme.accent:theme.disabled,this.lastActionEnabled?'#bd3d55':'#dfb8a7',14);this.actionText.color=color(this.lastActionEnabled?'#ffffff':'#8a6559');
+    this.box(this.actionGraphic,112,46,this.lastActionEnabled?craftTheme.accent:craftTheme.disabled,this.lastActionEnabled?'#bd3d55':'#dfb8a7',14);this.actionText.color=color(this.lastActionEnabled?'#ffffff':'#8a6559');
   }
   private refreshViewportHint():void {
     this.boardSizeText.string=`${this.level.width}×${this.level.height}`;
@@ -432,7 +461,7 @@ export class BeadGame extends Component {
   ]);}
   private confirmRestart():void {this.modal('重新制作'+this.level.title+'？','当前制作进度会清空，已收藏的成品会保留。',[{title:'从第一颗重新开始',run:()=>{const next=newRecord(this.level);next.completed=[...this.record.completed];next.collected=[...this.record.collected];next.sound=this.record.sound;next.tutorialStep=this.record.tutorialStep;if(!this.repo.save(next)){this.toast('保存失败，原进度已保留');return;}this.record=next;this.session=new PlaySession(this.level);this.openDrawerColor=this.session.selectedColor;this.revealPaletteColor();this.clearHint(true);this.dirty=false;this.saveFailed=false;this.closeModal();this.board.resetViewport();this.clearInput();this.refresh();},primary:true},{title:'继续当前作品',run:()=>this.closeModal()}]);}
   private showExit(): void {
-    const destination = this.personalMode ? '返回我的图纸' : this.sampleMode ? '退出样本试玩' : '返回关卡列表';
+    const destination = this.personalMode ? '返回我的图纸' : this.sampleMode ? '退出样本试玩' : '返回甜品岛';
     this.modal(destination+'？','当前进度会保存在本机。',[
       {title:destination,run:()=>this.leaveGame(),primary:true},
       {title:'继续当前作品',run:()=>this.closeModal()},
@@ -455,13 +484,17 @@ export class BeadGame extends Component {
     } else this.showLevels();
   }
   private showHome():void {this.showLevels();}
-  private showNavigationPage(screen:'levels'|'collection'|'patterns'|'draft',title:string,subtitle:string,back:()=>void=()=>this.showHome()):{top:number;compact:boolean} {
+  private showNavigationPage(screen:'levels'|'map'|'collection'|'patterns'|'draft',title:string,subtitle:string,back:()=>void=()=>this.showHome()):{top:number;compact:boolean} {
+    if(this.screen==='map'){const scroll=this.overlay.getChildByName('ScrollViewport')?.getComponent(ScrollView);if(scroll)this.homeScrollOffset=Math.max(0,Math.min(scroll.getScrollOffset().y,scroll.getMaxScrollOffset().y));}
     this.clearInput();this.board?.stopFocus();this.tweezers?.hide();this.closeModal();this.screen=screen;this.activeModal=true;this.hud.active=false;
     const H=this.worldHeight,top=this.storage.safeInsets(390).top,compact=H<700;
-    this.panel(this.overlay,195,H/2,390,H,theme.background,undefined,0).node.addComponent(BlockInputEvents);
+    this.worldBackground(this.overlay);
+    this.panel(this.overlay,195,H/2,390,H,'#123e7866',undefined,0).node.addComponent(BlockInputEvents);
+    const bottomSpace=screen==='draft'?14:87;const windowHeight=Math.max(80,H-top-84-this.bottom-bottomSpace);
+    this.panel(this.overlay,195,top+84+windowHeight/2,374,windowHeight,'#e4f4fffa',theme.line,0);
     if(screen!=='levels')this.button(this.overlay,'‹',37,top+28,38,38,back);
-    this.label(this.overlay,title,195,top+29,19,theme.text,260,true);
-    this.label(this.overlay,subtitle,195,top+(compact?55:75),11,theme.muted,340);
+    this.pixelHeading(this.overlay,title,195,top+29,21,260);
+    this.pixelHeading(this.overlay,subtitle,195,top+60,11,340);
     return {top,compact};
   }
   private activateLevel(index:number):void {
@@ -475,8 +508,8 @@ export class BeadGame extends Component {
     if(loaded.kind==='backup')this.toast('已从备用记录恢复进度');
   }
   /** Content uses a top-left style coordinate system, while Cocos keeps the view centered. */
-  private scrollContent(top:number,contentHeight:number):Node {
-    const height=Math.max(80,this.worldHeight-top-this.bottom-12);
+  private scrollContent(top:number,contentHeight:number,bottomSpace=12):Node {
+    const height=Math.max(80,this.worldHeight-top-this.bottom-bottomSpace);
     const viewport=this.container('ScrollViewport',this.overlay);this.position(viewport,195,top+height/2);
     viewport.addComponent(UITransform).setContentSize(390,height);viewport.addComponent(Mask).type=Mask.Type.GRAPHICS_RECT;
     const content=this.container('ScrollContent',viewport),transform=content.addComponent(UITransform);
@@ -484,71 +517,106 @@ export class BeadGame extends Component {
     const scroll=viewport.addComponent(ScrollView);scroll.content=content;scroll.horizontal=false;scroll.vertical=true;scroll.cancelInnerEvents=true;
     return content;
   }
+  /** A hollow bead is the common motif across navigation and the map. */
+  private beadToken(parent:Node,x:number,y:number,r:number,fill:string):void {
+    const node=this.container('PixelBeadToken',parent);this.position(node,x,y);const g=node.addComponent(Graphics);pixelBox(g,r*2,r*2,fill,theme.line);g.fillColor=color('#fff6d7');g.rect(-r*.3,-r*.3,r*.6,r*.6);g.fill();
+  }
+  private navigation(active:'levels'|'patterns'|'collection'):void {
+    const y=this.worldHeight-this.bottom-38;
+    this.panel(this.overlay,195,y+8,390,88,theme.surface,theme.line,22).node.addComponent(BlockInputEvents);
+    const items: {key:'levels'|'patterns'|'collection';title:string;run:()=>void}[]=[
+      {key:'levels',title:'关卡地图',run:()=>this.showMap()},
+      {key:'patterns',title:'自制图纸',run:()=>this.showPatterns()},
+      {key:'collection',title:'作品集',run:()=>this.showShelf()},
+    ];
+    items.forEach((item,i)=>this.button(this.overlay,item.title,66+i*129,y,116,44,item.run,item.key===active));
+  }
   private showLevels():void {
-    const {top,compact}=this.showNavigationPage('levels','拼拼豆豆儿','选择作品 · 按顺序解锁');
-    this.button(this.overlay,'作品集',337,top+28,74,36,()=>this.showShelf());
-    this.button(this.overlay,this.record.sound?'音效开':'音效关',53,top+28,74,36,()=>{
-      if (this.personalMode) {
-        this.activateLevel(this.lastFormalIndex);
-        if (this.personalMode) { this.toast('正式关卡设置暂时无法读取'); return; }
-      }
-      this.record.sound=!this.record.sound;this.dirty=true;this.flush();this.showLevels();if(this.saveFailed)this.toast('保存失败，请重试');
+    if(this.screen==='map'){const scroll=this.overlay.getChildByName('ScrollViewport')?.getComponent(ScrollView);if(scroll)this.homeScrollOffset=Math.max(0,Math.min(scroll.getScrollOffset().y,scroll.getMaxScrollOffset().y));}
+    this.clearInput();this.board?.stopFocus();this.tweezers?.hide();this.closeModal();this.screen='levels';this.activeModal=true;this.hud.active=false;
+    const H=this.worldHeight,top=this.storage.safeInsets(390).top,L=homeLayout(H,top,this.bottom);
+    this.worldBackground(this.overlay);
+    const title=this.container('PixelGameTitle',this.overlay);this.position(title,195,L.titleY);title.addComponent(UITransform).setContentSize(350,116);
+    const logo=title.addComponent(Sprite);logo.spriteFrame=this.titleFrame;logo.sizeMode=Sprite.SizeMode.CUSTOM;title.getComponent(UITransform)!.setContentSize(350,116);
+    this.pixelHeading(this.overlay,'一颗颗拼出你的小世界',195,L.titleY+70,13,340);
+    const summary=summarizeHomeProgress(this.levels,this.storage),index=summary.nextIndex,level=this.levels[index];
+    const loaded=level?loadLevel(this.storage,level):null,record=loaded&&'record' in loaded?loaded.record:null;
+    const continuing=!!record?.session.filled.length&&record.session.phase!=='collected';
+    const allDone=summary.total>0&&summary.completed===summary.total&&!continuing;
+    this.button(this.overlay,'关卡选择',55,top+29,88,34,()=>this.showMap());
+    this.button(this.overlay,this.record.sound?'♪':'♪ ×',350,top+29,43,34,()=>{
+      if(this.personalMode){this.activateLevel(this.lastFormalIndex);if(this.personalMode)return;}
+      this.record.sound=!this.record.sound;this.dirty=true;this.flush();this.showLevels();
     });
-    const entryY=top+(compact?91:110);
-    if (canPickPatternImage()) this.button(this.overlay,'自制图纸',195,entryY,338,38,()=>this.showPatterns(),true);
-    const height=compact?125:170,step=height+14,rows=Math.ceil(this.levels.length/2);
-    const viewTop=canPickPatternImage()?entryY+28:top+(compact?70:96);
-    const content=this.scrollContent(viewTop,rows*step+12),origin=this.worldHeight/2;
-    this.levels.forEach((level,index)=>{
-      const x=109+(index%2)*172,y=origin+height/2+Math.floor(index/2)*step;
-      const unlocked=levelUnlocked(this.levels,index,this.storage),loaded=loadLevel(this.storage,level),record='record' in loaded?loaded.record:null;
-      const status=!unlocked?'完成上一关解锁':record?.completed.includes(level.id)?'已完成':record?.session.filled.length?`进行中 ${record.session.filled.length}/${level.cells.filter(Boolean).length}`:'可以开始';
-      const card=this.panel(content,x,y,166,height,theme.board,theme.boardEdge,18).node;
-      card.on(Node.EventType.TOUCH_START,()=>{});
-      card.on(Node.EventType.TOUCH_END,(event:EventTouch)=>{event.propagationStopped=true;this.activateLevel(index);});
-      const art=this.container('LevelPreview',content);this.position(art,x,y-(compact?22:24));
-      FusedArtwork.create(art,level,compact?3.3:Math.min(5,140/level.width,110/level.height),this.finishedFrames[index]).showCells(null);
-      this.label(content,`${String(index+1).padStart(2,'0')}  ${level.title}`,x,y+(compact?28:48),12,theme.text,154,true);
-      this.label(content,status,x,y+(compact?47:68),10,theme.muted,154);
+    const primary=this.button(this.overlay,allDone?'欣赏作品集':continuing?'继续拼豆':'开始拼豆',195,L.primaryY,326,64,
+      ()=>allDone?this.showShelf():continuing?this.activateLevel(index):this.showMap(),true);
+    primary.node.name='HomeStartButton';primary.label.fontSize=34;primary.label.lineHeight=42;primary.label.enableOutline=true;primary.label.outlineColor=color('#9c3446');primary.label.outlineWidth=2;
+    const create=this.button(this.overlay,'自制图纸',109,L.secondaryY,154,48,()=>this.showPatterns());create.label.fontSize=23;
+    const shelf=this.button(this.overlay,'作品集',281,L.secondaryY,154,48,()=>this.showShelf());shelf.label.fontSize=23;
+    this.pixelHeading(this.overlay,continuing&&level?`${level.title} · 已拼 ${record!.session.filled.length} 颗`:`${summary.completed} 件收藏  ·  ${summary.total} 款甜品等你探索`,195,L.footerY,11,350);
+  }
+  private showMap():void {
+    const {top}=this.showNavigationPage('map','云上冒险','沿着星星小路，收集一岛甜蜜');
+    const summary=summarizeHomeProgress(this.levels,this.storage),o=this.worldHeight/2;
+    const content=this.scrollContent(top+88,120+this.levels.length*166,94);
+    this.panel(content,195,o+33,334,46,theme.rose,theme.line,0);
+    this.label(content,`${summary.completed} 件收藏    ${summary.unlocked} 关已解锁    ${summary.total} 款甜品`,195,o+33,12,theme.text,320,true);
+    const points=this.levels.map((_,i)=>({x:i%2?281:109,y:139+i*166}));
+    const trail=this.container('PixelStarTrail',content).addComponent(Graphics);
+    points.slice(1).forEach((end,i)=>{const start=points[i];for(let t=.15;t<1;t+=.12){const x=start.x+(end.x-start.x)*t-195,y=-(start.y+(end.y-start.y)*t);pixelStar(trail,x,y,8,i<summary.completed?theme.yellow:'#70b8e9');}});
+    this.levels.forEach((item,i)=>{
+      const {x,y}=points[i],saved=loadLevel(this.storage,item),r='record' in saved?saved.record:null;
+      const unlocked=levelUnlocked(this.levels,i,this.storage),done=!!r?.collected.includes(item.id),started=!!r?.session.filled.length&&r.session.phase!=='collected',cx=i%2?109:281;
+      this.panel(content,x,o+y+8,110,88,unlocked?'#46bf64':'#7a91b7',theme.line,0);
+      this.panel(content,x,o+y-4,102,90,unlocked?theme.surface:'#d2e1ef',theme.line,0);
+      const art=this.container('LevelPixelPreview',content);this.position(art,x,o+y-6);
+      FusedArtwork.create(art,item,Math.min(72/item.width,68/item.height)).showCells(null);
+      this.panel(content,x,o+y+48,43,24,done?theme.mint:unlocked?theme.accent:theme.muted,theme.line,0);
+      this.label(content,done?'✓':String(i+1).padStart(2,'0'),x,o+y+48,12,'#ffffff',40,true);
+      this.label(content,item.title,cx,o+y-25,14,theme.text,150,true);
+      this.label(content,!unlocked?'完成上一关解锁':started?`已拼 ${r!.session.filled.length} 颗`:done?'已收藏 · 可重新制作':`${item.cells.filter(Boolean).length} 颗豆 · 等你来拼`,cx,o+y-1,10,theme.muted,152);
+      const b=this.button(content,!unlocked?'未解锁':started?'继续拼豆':done?'再做一次':'开始拼豆',cx,o+y+30,132,36,()=>this.activateLevel(i),unlocked);
+      if(!unlocked)this.box(b.graphic,132,36,'#c1d2e6',theme.muted);
+      const star=this.container('MapStar',content);this.position(star,i%2?335:52,o+y+85);pixelStar(star.addComponent(Graphics),0,0,15,theme.yellow);
     });
+    const scroll=content.parent!.getComponent(ScrollView)!;
+    this.scheduleOnce(()=>{if(content.isValid)scroll.scrollToOffset(new Vec2(0,Math.max(0,Math.min(this.homeScrollOffset,scroll.getMaxScrollOffset().y))),0);},0);
+    this.navigation('levels');
   }
   private showPatterns(): void {
-    const { top, compact } = this.showNavigationPage('patterns', '我的图纸', '从一张喜欢的图开始', () => this.leavePatterns());
-    const actionY = top + (compact ? 86 : 111);
-    this.button(this.overlay, this.pickingImage ? '正在打开相册…' : '选图制作', 195, actionY, 338, 42,
-      () => void this.pickImage(), true);
-    let entries: LevelDefinition[];
-    try {
-      entries = this.patterns.list();
-    } catch {
-      this.label(this.overlay, '图纸暂时无法读取，请返回后重试', 195, actionY + 60, 14, theme.muted, 340);
-      return;
+    const {top}=this.showNavigationPage('patterns','自制图纸','把喜欢的图片，变成手里的小作品',()=>this.leavePatterns());
+    let entries:LevelDefinition[]=[];
+    let readError=false;
+    try{entries=this.patterns.list();}catch{readError=true;}
+    const content=this.scrollContent(top+84,Math.max(490,282+entries.length*94),88),o=this.worldHeight/2;
+    this.panel(content,195,o+93,350,178,theme.rose,theme.boardEdge,23);
+    this.beadToken(content,325,o+41,17,theme.mint);
+    this.label(content,'你的灵感，值得拼出来',173,o+35,20,theme.text,285,true);
+    this.label(content,'选一张清晰的图 · 保留完整比例 · 逐格预览',185,o+69,11,theme.muted,310);
+    this.button(content,this.pickingImage?'正在打开相册…':'＋  选图制作',195,o+115,310,44,()=>void this.pickImage(),true);
+    this.label(content,'支持 JPG / PNG · 图纸保存在当前设备',195,o+153,10,theme.muted,320);
+    this.label(content,'小板 14×14  /  中板 21×21  /  大板 29×29',195,o+210,11,theme.text,350,true);
+    this.label(content,'简单图标用小板，细节较多建议选大板',195,o+233,10,theme.muted,350);
+    this.label(content,`我的图纸 · ${entries.length} 张`,111,o+270,16,theme.text,185,true);
+    if(!entries.length){
+      this.panel(content,195,o+376,350,154,theme.surface,theme.line,22);
+      this.beadToken(content,195,o+342,21,theme.lavender);
+      this.label(content,readError?'图纸暂时无法读取':'第一份灵感，从这里收藏',195,o+390,16,theme.text,320,true);
+      this.label(content,readError?'返回首页后可重试，原记录会保留':'选图 → 调整预览 → 保存图纸或开始拼豆',195,o+421,11,theme.muted,325);
     }
-    if (!entries.length) {
-      this.label(this.overlay, '已保存的图纸会出现在这里', 195, actionY + 65, 14, theme.muted, 320);
-      return;
-    }
-    const rowHeight = 87;
-    const content = this.scrollContent(actionY + 31, entries.length * rowHeight + 8);
-    entries.forEach((level, index) => {
-      const y = this.worldHeight / 2 + 41 + index * rowHeight;
-      const card = this.panel(content, 195, y, 338, 76, theme.surface, theme.line, 16).node;
-      card.on(Node.EventType.TOUCH_START, () => {});
-      card.on(Node.EventType.TOUCH_END, (event: EventTouch) => {
-        event.propagationStopped = true;
-        this.openPattern(level);
-      });
-      const art = this.container('PersonalThumbnail', content);
-      this.position(art, 68, y);
-      FusedArtwork.create(art, level, 53 / Math.max(level.width, level.height), undefined, 5).showCells(null);
-      const loaded = this.patterns.session(level).load();
-      const total = level.cells.filter(Boolean).length;
-      const status = 'record' in loaded
-        ? loaded.record.collected.includes(level.id) ? '已完成' : `制作中 · ${loaded.record.session.filled.length}/${total} 颗`
-        : loaded.kind === 'empty' ? `待开拼 · ${total} 颗` : '存档暂时不可用';
-      this.label(content, level.title, 218, y - 11, 15, theme.text, 220, true);
-      this.label(content, status, 218, y + 13, 11, theme.muted, 220);
+    entries.forEach((level,index)=>{
+      const y=o+332+index*94;
+      const card=this.panel(content,195,y,350,82,theme.surface,theme.line,18).node;
+      card.on(Node.EventType.TOUCH_START,()=>{});
+      card.on(Node.EventType.TOUCH_END,(e:EventTouch)=>{e.propagationStopped=true;this.openPattern(level);});
+      const art=this.container('PersonalThumbnail',content);this.position(art,66,y);
+      FusedArtwork.create(art,level,57/Math.max(level.width,level.height),undefined,5).showCells(null);
+      const saved=this.patterns.session(level).load(),total=level.cells.filter(Boolean).length;
+      const status='record' in saved?saved.record.collected.includes(level.id)?'已收藏':`已拼 ${saved.record.session.filled.length}/${total} 颗`:saved.kind==='empty'?`待开拼 · ${total} 颗`:'存档暂时不可用';
+      this.label(content,level.title,220,y-12,15,theme.text,225,true);
+      this.label(content,`${level.width}×${level.height} · ${status}  ›`,220,y+14,11,theme.muted,225);
     });
+    this.navigation('patterns');
   }
 
   private leavePatterns(): void {
@@ -604,7 +672,9 @@ export class BeadGame extends Component {
       const art = this.container('PatternDetail', this.overlay);
       this.position(art, 195, center);
       if (draft.detail === 'result' && level) {
-        FusedArtwork.create(art, level, Math.min(314 / level.width, (height - 16) / level.height), undefined, 12).showCells(null);
+        const unit = Math.min(314 / level.width, (height - 16) / level.height);
+        FusedArtwork.create(art, level, unit, undefined, 12).showCells(null);
+        this.drawPatternGrid(art, level, unit);
       } else {
         art.addComponent(UITransform);
         PatternImage.show(art, draft.image, 314, height - 16);
@@ -616,7 +686,7 @@ export class BeadGame extends Component {
       this.showPatterns();
     });
     const imageHeight = compact ? 137 : 192;
-    const content = this.scrollContent(top + (compact ? 69 : 95), imageHeight + (draft.adjusting ? 284 : 178));
+    const content = this.scrollContent(top + (compact ? 69 : 95), imageHeight + (draft.adjusting ? 440 : 340));
     const origin = this.worldHeight / 2, center = origin + 37 + imageHeight / 2;
     this.label(content, '原图', level ? 109 : 195, origin + 20, 12, theme.text, 160, true);
     const sourcePanel = this.panel(content, level ? 109 : 195, center, level ? 166 : 338, imageHeight, theme.surface, theme.line, 14);
@@ -631,7 +701,9 @@ export class BeadGame extends Component {
       this.bindPatternDetail(resultPanel.node, draft, 'result');
       const art = this.container('PatternResult', content);
       this.position(art, 281, center);
-      FusedArtwork.create(art, level, Math.min(149 / level.width, (imageHeight - 14) / level.height), undefined, 12).showCells(null);
+      const previewUnit = Math.min(149 / level.width, (imageHeight - 14) / level.height);
+      FusedArtwork.create(art, level, previewUnit, undefined, 12).showCells(null);
+      this.drawPatternGrid(art, level, previewUnit);
     }
     let y = origin + imageHeight + 63;
     if (level) {
@@ -641,6 +713,16 @@ export class BeadGame extends Component {
       this.label(content, draft.error, 195, y, 11, theme.accent, 338, true);
     }
     y += 41;
+    const boardSize = draft.options.boardSize ?? 14;
+    patternBoardSizes.forEach((board, index) => {
+      this.button(content, `${board.label} ${board.size}×${board.size}`, 79 + index * 116, y, 106, 38, () => {
+        if (draft.options.boardSize === board.size) return;
+        draft.options.boardSize = board.size;
+        this.generateDraft();
+      }, boardSize === board.size);
+    });
+    this.label(content, `${boardSize}×${boardSize} 格 · 最多 ${boardSize * boardSize} 颗 · 空位不放豆`, 195, y + 33, 10, theme.muted, 338);
+    y += 62;
     if (level || draft.error) {
       this.button(content, draft.adjusting ? '收起调整' : '调整图纸', 109, y, 166, 36, () => {
         draft.adjusting = !draft.adjusting;
@@ -648,6 +730,15 @@ export class BeadGame extends Component {
       });
       this.button(content, '换图', 281, y, 166, 36, () => void this.pickImage());
       y += 44;
+    }
+    if (level && typeof window !== 'undefined') {
+      this.button(content, `孔距 ${this.printPitchMm}mm · 点击切换`, 109, y, 166, 36, () => {
+        this.printPitchMm = this.printPitchMm === 2.6 ? 5 : 2.6;
+        this.showDraft();
+      });
+      this.button(content, '打印 1:1 图纸', 281, y, 166, 36, () => this.printDraft());
+      this.label(content, '按实际拼板选孔距 · 打印时选择 100% 原尺寸', 195, y + 31, 10, theme.muted, 338);
+      y += 62;
     }
     if (draft.adjusting) {
       this.button(content, draft.options.cropToSubject ? '构图 · 裁到主体' : '构图 · 保留整图', 195, y, 338, 36, () => {
@@ -677,6 +768,37 @@ export class BeadGame extends Component {
       draft.detail = detail;
       this.showDraft();
     });
+  }
+
+  private drawPatternGrid(parent: Node, level: LevelDefinition, unit: number): void {
+    const gridNode = new Node('PatternGrid');
+    gridNode.layer = parent.layer;
+    parent.addChild(gridNode);
+    const grid = gridNode.addComponent(Graphics);
+    const width = level.width * unit, height = level.height * unit;
+    grid.lineWidth = Math.max(.35, unit * .035);
+    grid.strokeColor = color('#234a91', 46);
+    for (let col = 0; col <= level.width; col++) {
+      const x = -width / 2 + col * unit;
+      grid.moveTo(x, -height / 2); grid.lineTo(x, height / 2);
+    }
+    for (let row = 0; row <= level.height; row++) {
+      const y = height / 2 - row * unit;
+      grid.moveTo(-width / 2, y); grid.lineTo(width / 2, y);
+    }
+    grid.stroke();
+  }
+
+  private printDraft(): void {
+    const level = this.draft?.level;
+    if (!level || typeof window === 'undefined' || typeof URL === 'undefined' || typeof Blob === 'undefined') {
+      this.toast('当前环境不支持打印');
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([patternPrintDocument(level, this.printPitchMm)], { type: 'text/html;charset=utf-8' }));
+    const popup = window.open(url, '_blank');
+    if (!popup) this.toast('请允许打开打印图纸窗口');
+    this.scheduleOnce(() => URL.revokeObjectURL(url), 10);
   }
 
   private confirmDraft(start: boolean): void {
@@ -724,45 +846,65 @@ export class BeadGame extends Component {
   }
 
   private showShelf():void {
-    const {top,compact}=this.showNavigationPage('collection','我的作品集','甜品与饮食 · 收藏的作品');
-    const saved=this.levels.map((level,index)=>({level,index,loaded:loadLevel(this.storage,level)})).filter(item=>'record' in item.loaded&&item.loaded.record.collected.includes(item.level.id));
-    if(!saved.length){
-      const y=top+(compact?105:230);
-      this.panel(this.overlay,195,y,350,compact?70:200,theme.board,theme.boardEdge,20);
-      this.label(this.overlay,'还没有收藏的作品',195,y-(compact?8:15),16,theme.text,300,true);
-      this.label(this.overlay,'完成拼豆、熨烫和揭纸后，作品会出现在这里',195,y+(compact?13:18),11,theme.muted,320);
-      return;
+    const {top}=this.showNavigationPage('collection','我的作品集','把一颗颗耐心，摆成一排小骄傲');
+    const saved=this.levels.map((level,index)=>({level,index,personal:false,loaded:loadLevel(this.storage,level)}));
+    let personalReadError=false;
+    try{this.patterns.list().forEach(level=>saved.push({level,index:-1,personal:true,loaded:this.patterns.session(level).load()}));}catch{personalReadError=true;}
+    const collected=saved.filter(item=>'record' in item.loaded&&item.loaded.record.collected.includes(item.level.id));
+    const content=this.scrollContent(top+84,Math.max(500,140+Math.ceil(collected.length/2)*188),88),o=this.worldHeight/2;
+    this.panel(content,195,o+54,350,96,theme.mintPale,theme.line,22);
+    this.label(content,`${collected.length} 件小作品`,128,o+41,23,theme.text,210,true);
+    this.label(content,personalReadError?'自制图纸暂不可读，返回后可重试':'完成拼豆、熨烫、揭纸，就能收藏',164,o+73,11,theme.muted,285);
+    this.beadToken(content,317,o+45,24,theme.mint);
+    if(!collected.length){
+      this.panel(content,195,o+250,350,256,theme.surface,theme.line,23);
+      const art=this.container('EmptyShelfArtwork',content);this.position(art,195,o+192);
+      const first=this.levels[0];
+      if(first)FusedArtwork.create(art,first,Math.min(110/first.width,88/first.height),this.finishedFrames[0]).showCells(null);
+      this.label(content,'给第一件作品留了个位置',195,o+264,18,theme.text,325,true);
+      this.label(content,'从一块草莓蛋糕，开启你的收藏',195,o+294,11,theme.muted,320);
+      this.button(content,'去拼第一份甜蜜  ›',195,o+339,286,44,()=>this.activateLevel(0),true);
     }
-    const height=compact?125:170,step=height+14,rows=Math.ceil(saved.length/2),viewTop=top+(compact?70:96);
-    const content=this.scrollContent(viewTop,rows*step+12),origin=this.worldHeight/2;
-    saved.forEach(({level,index},position)=>{
-      const x=109+(position%2)*172,y=origin+height/2+Math.floor(position/2)*step;
-      const card=this.panel(content,x,y,166,height,theme.board,theme.boardEdge,18).node;
+    collected.forEach(({level,index,personal},i)=>{
+      const x=107+i%2*176,y=o+208+Math.floor(i/2)*188;
+      const card=this.panel(content,x,y,166,174,theme.surface,theme.line,21).node;
       card.on(Node.EventType.TOUCH_START,()=>{});
-      card.on(Node.EventType.TOUCH_END,(event:EventTouch)=>{event.propagationStopped=true;this.showShelfDetail(index);});
-      const art=this.container('ShelfArtwork',content);this.position(art,x,y-(compact?15:15));
-      FusedArtwork.create(art,level,compact?3.3:Math.min(5,140/level.width,120/level.height),this.finishedFrames[index]).showCells(null);
-      this.label(content,level.title,x,y+(compact?45:62),12,theme.text,154,true);
+      card.on(Node.EventType.TOUCH_END,(e:EventTouch)=>{e.propagationStopped=true;this.showShelfDetail(index,personal?level:undefined);});
+      const art=this.container('ShelfArtwork',content);this.position(art,x,y-21);
+      FusedArtwork.create(art,level,Math.min(130/level.width,100/level.height),personal?undefined:this.finishedFrames[index]).showCells(null);
+      this.label(content,level.title,x,y+46,12,theme.text,154,true);
+      this.label(content,personal?'我的创作 · 已收藏':'甜品岛 · 已收藏',x,y+69,10,theme.muted,154);
     });
+    this.navigation('collection');
   }
-  private showShelfDetail(index:number):void {
-    const level=this.levels[index];const {top,compact}=this.showNavigationPage('collection',level.title,'已收藏 · 甜品与饮食',()=>this.showShelf());
-    const y=top+(compact?100:230);this.panel(this.overlay,195,y,350,compact?65:245,theme.board,theme.boardEdge,20);
-    if(!compact){const art=this.container('ShelfDetailArtwork',this.overlay);this.position(art,195,y);FusedArtwork.create(art,level,Math.min(11,350/level.width,(index===0?195:280)/level.height),this.finishedFrames[index]).showCells(null);}
-    else this.label(this.overlay,level.title+' · 已收藏',195,y,14,theme.text,320,true);
-    const by=top+(compact?156:380);
-    this.button(this.overlay,'再做一次',195,by,338,44,()=>{this.activateLevel(index);if(this.screen==='game')this.confirmRestart();},true);
-    this.button(this.overlay,'返回作品集',195,by+55,338,40,()=>this.showShelf());
+  private showShelfDetail(index:number,personal?:LevelDefinition):void {
+    const level=personal??this.levels[index];
+    const {top}=this.showNavigationPage('collection',level.title,personal?'我的创作 · 已收藏':'甜品岛 · 已收藏',()=>this.showShelf());
+    const content=this.scrollContent(top+84,450,88),o=this.worldHeight/2;
+    this.panel(content,195,o+145,350,270,theme.surface,theme.line,24);
+    const art=this.container('ShelfDetailArtwork',content);this.position(art,195,o+140);
+    FusedArtwork.create(art,level,Math.min(300/level.width,220/level.height),personal?undefined:this.finishedFrames[index]).showCells(null);
+    this.label(content,`${level.cells.filter(Boolean).length} 颗豆 · ${level.palette.length} 色 · 每一颗都是耐心`,195,o+304,11,theme.muted,340);
+    this.button(content,'再做一次',195,o+352,338,44,()=>{if(personal)this.openPattern(level);else this.activateLevel(index);if(this.screen==='game')this.confirmRestart();},true);
+    this.button(content,'返回作品集',195,o+406,338,40,()=>this.showShelf());
+    this.navigation('collection');
   }
   private showCollection():void {
-    if(!this.record.collected.includes(this.level.id)){this.modal('我的作品集','第一件作品正在慢慢成形。\n完成拼豆和熨烫后，把草莓蛋糕摆上展架。',[{title:'继续制作',run:()=>this.closeModal(),primary:true}]);return;}
-    const status = this.personalMode ? '✓ 已收藏到我的图纸' : this.sampleMode ? '✓ 已收藏到本机试玩记录' : '✓ 已收藏 · 第 '+String(this.level.order).padStart(2,'0')+' 件作品';
-    this.modal(this.level.title,status,[{title:'再做一次',run:()=>this.confirmRestart()},{title:this.personalMode?'返回我的图纸':this.sampleMode?'退出样本试玩':'返回关卡列表',run:()=>this.leaveGame()},{title:'回到作品',run:()=>this.closeModal(),primary:true}],true);
+    if(!this.record.collected.includes(this.level.id)){this.modal('我的作品集','完成拼豆、熨烫和揭纸，就能收藏这件作品。',[{title:'继续制作',run:()=>this.closeModal(),primary:true}]);return;}
+    const next=this.levels.indexOf(this.level)+1;
+    const canContinue=!this.personalMode&&!this.sampleMode&&next<this.levels.length;
+    const status=this.personalMode?'✓ 已收藏到我的图纸与作品集':this.sampleMode?'✓ 已收藏到本机试玩记录':`✓ 甜品岛收藏 +1${canContinue?' · 下一关已解锁':' · 甜品岛已完成'}`;
+    const actions:Action[]=[
+      {title:'再做一次',run:()=>this.confirmRestart()},
+      {title:this.sampleMode?'退出样本试玩':'欣赏作品集',run:()=>this.sampleMode?this.leaveGame():this.showShelf()},
+      {title:canContinue?'下一份甜蜜  ›':'回到作品',run:()=>canContinue?this.activateLevel(next):this.closeModal(),primary:true},
+    ];
+    this.modal('完成啦！'+this.level.title,status,actions,true);
   }
   private modal(title:string,message:string,actions:Action[],artwork=false):void {
     this.closeModal();this.clearInput();this.flush();this.activeModal=true;this.tweezers?.hide();const H=this.worldHeight;
     const height=Math.min(H-30,artwork?465:210+actions.length*53),top=H-height;
-    const blocker=this.panel(this.overlay,195,H/2,390,H,'#59413e66',undefined,0).node;blocker.addComponent(BlockInputEvents);
+    const blocker=this.panel(this.overlay,195,H/2,Math.max(390,view.getVisibleSize().width),H,this.screen==='game'?'#59413e66':'#101d6dcc',undefined,0).node;blocker.addComponent(BlockInputEvents);
     let backdropStart:Point|null=null;
     blocker.on(Node.EventType.TOUCH_START,(e:EventTouch)=>{backdropStart=this.uiPoint(e);});
     blocker.on(Node.EventType.TOUCH_MOVE,(e:EventTouch)=>{const p=this.uiPoint(e);if(backdropStart&&Math.hypot(p.x-backdropStart.x,p.y-backdropStart.y)>10)backdropStart=null;});
@@ -789,7 +931,7 @@ export class BeadGame extends Component {
     {title:'重试读取记录',run:()=>{const r=this.repo.load();if('record'in r){this.record=r.record;this.session=PlaySession.restore(this.level,this.record.session);this.openDrawerColor=this.session.selectedColor;this.revealPaletteColor();this.blocked=false;this.closeModal();this.refresh();}else this.toast('暂未恢复，请稍后重试');}},
     {title:'确认新开一局',run:()=>{this.modal('保留旧记录，新开一局？','会先备份当前记录，备份失败时不清空。',[{title:'备份并重新开始',run:()=>{try{const backup=[this.storage.get(this.storagePrefix()+'-0'),this.storage.get(this.storagePrefix()+'-1')];this.storage.set(this.storagePrefix()+'-recovery',JSON.stringify(backup));const r=newRecord(this.level);if(!this.repo.save(r))throw new Error('save');this.record=r;this.session=new PlaySession(this.level);this.openDrawerColor=this.session.selectedColor;this.revealPaletteColor();this.blocked=false;this.closeModal();this.refresh();}catch{this.toast('存储失败，旧记录已保留');}},primary:true},{title:'返回',run:()=>this.recovery(kind)}]);}},
   ]);}
-  private toast(text:string):void {if(this.toastNode)this.toastNode.destroy();const y=this.stageTop+this.stageHeight-24;const n=this.panel(this.overlay,195,y,Math.min(356,text.length*12+30),38,'#59413eef',undefined,13).node;this.toastNode=n;this.label(n,text,195,this.worldHeight/2,11,'#fffaf1',330);this.scheduleOnce(()=>{if(n.isValid)n.destroy();if(this.toastNode===n)this.toastNode=null;},2.6);}
+  private toast(text:string):void {if(this.toastNode)this.toastNode.destroy();const y=this.stageTop+this.stageHeight-24;const n=this.panel(this.overlay,195,y,Math.min(356,text.length*12+30),38,'#142c71f5',undefined,13).node;this.toastNode=n;this.label(n,text,195,this.worldHeight/2,11,'#fffaf1',330);this.scheduleOnce(()=>{if(n.isValid)n.destroy();if(this.toastNode===n)this.toastNode=null;},2.6);}
   private flush():void {if(!this.ready||this.blocked||!this.dirty)return;this.record.session=this.session.serialize();if(this.repo.save(this.record)){this.dirty=false;this.saveFailed=false;}else{if(!this.saveFailed)this.toast('进度保存失败，请在设置中重试');this.saveFailed=true;}this.elapsed=0;}
   private refreshTweezers():void {
     if(!this.tweezers)return;
@@ -806,6 +948,9 @@ export class BeadGame extends Component {
   update(dt:number):void {this.refreshTweezers();if(this.ready&&this.board.focusing)this.refreshViewportHint();if(this.ready&&this.dirty&&!this.wasHidden){this.elapsed+=dt;if(this.elapsed>=.2)this.flush();}}
   private onHide():void {this.wasHidden=true;this.mousePoint=null;this.tweezers?.hide();this.panModifier=false;this.clearInput();this.audio?.stop();this.flush();}
   private onShow():void {this.wasHidden=false;this.clearInput();if(this.ready)this.refresh();}
-  private onResize():void {if(this.ready){const screen=this.screen;this.clearInput();this.flush();this.hud.active=true;this.build();this.refresh();if(screen==='home')this.showHome();else if(screen==='levels')this.showLevels();else if(screen==='collection')this.showShelf();else if(screen==='patterns')this.showPatterns();else if(screen==='draft')this.showDraft();}}
+  private onResize():void {if(this.ready){
+    const wide=sys.isBrowser&&window.innerWidth>=window.innerHeight;
+    if(wide!==this.wideLayout){this.wideLayout=wide;view.setDesignResolutionSize(390,844,wide?ResolutionPolicy.FIXED_HEIGHT:this.sampleMode?ResolutionPolicy.SHOW_ALL:ResolutionPolicy.FIXED_WIDTH);}
+    const screen=this.screen;this.clearInput();this.flush();this.hud.active=true;this.build();this.refresh();if(screen==='home')this.showHome();else if(screen==='levels')this.showLevels();else if(screen==='map')this.showMap();else if(screen==='collection')this.showShelf();else if(screen==='patterns')this.showPatterns();else if(screen==='draft')this.showDraft();}}
   onDestroy():void {this.paletteDrawerStates.forEach(state=>Tween.stopAllByTarget(state));this.tweezers?.destroy();this.tweezers=null;this.board?.stopFocus();this.clearHint();this.flush();game.off(Game.EVENT_HIDE,this.onHide,this);game.off(Game.EVENT_SHOW,this.onShow,this);view.off('canvas-resize',this.onResize,this);input.off(Input.EventType.KEY_DOWN,this.keyDown,this);input.off(Input.EventType.KEY_UP,this.keyUp,this);input.off(Input.EventType.MOUSE_DOWN,this.trackMouse,this);input.off(Input.EventType.MOUSE_MOVE,this.mouseMove,this);input.off(Input.EventType.MOUSE_UP,this.mouseUp,this);}
 }

@@ -9,10 +9,15 @@ export interface ImagePixels {
 export interface PatternOptions {
   cropToSubject: boolean;
   removeWhiteBackground: boolean;
+  boardSize?: 14 | 21 | 29;
 }
 
-export const defaultPatternOptions: PatternOptions = { cropToSubject: true, removeWhiteBackground: true };
-const maxBoardSide = 48;
+export const patternBoardSizes = [
+  { label: '小板', size: 14 },
+  { label: '中板', size: 21 },
+  { label: '大板', size: 29 },
+] as const;
+export const defaultPatternOptions: PatternOptions = { cropToSubject: true, removeWhiteBackground: true, boardSize: 14 };
 const maxColors = 14;
 const minColorDistance = 8 * 19 ** 2;
 type RGB = readonly [number, number, number];
@@ -124,6 +129,8 @@ function nearestColor(sample: RGB, palette: readonly RGB[]): number {
 export function imageToLevel(
   image: ImagePixels, id: string, title: string, options: PatternOptions = defaultPatternOptions,
 ): LevelDefinition {
+  const boardSize = options.boardSize ?? 14;
+  if (!patternBoardSizes.some(board => board.size === boardSize)) throw new Error('请选择小板、中板或大板');
   const { width, height, data } = image;
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 ||
       width > 512 || height > 512 || data.length !== width * height * 4) {
@@ -141,10 +148,12 @@ export function imageToLevel(
   if (!options.cropToSubject) { left = 0; top = 0; right = width - 1; bottom = height - 1; }
 
   const spanX = right - left + 1, spanY = bottom - top + 1;
-  const ratio = maxBoardSide / Math.max(spanX, spanY);
+  const ratio = boardSize / Math.max(spanX, spanY);
   const cols = Math.max(1, Math.round(spanX * ratio));
   const rows = Math.max(1, Math.round(spanY * ratio));
-  const samples: (RGB | null)[] = [];
+  const offsetX = Math.floor((boardSize - cols) / 2);
+  const offsetY = Math.floor((boardSize - rows) / 2);
+  const samples: (RGB | null)[] = Array(boardSize * boardSize).fill(null);
   for (let row = 0; row < rows; row++) {
     const y0 = top + Math.floor(row * spanY / rows);
     const y1 = top + Math.ceil((row + 1) * spanY / rows);
@@ -175,8 +184,14 @@ export function imageToLevel(
       }
       const area = (y1 - y0) * (x1 - x0);
       // Preserve thin outlines. For fill, use the strongest group of neighboring RGB values.
-      const color = dark / area >= .22 ? stroke : occupied / area >= .30 ? fill ?? stroke : undefined;
-      samples.push(color ? averageColor(color) : null);
+      // A real pegboard has one bead for every square, so a thin but visible
+      // source stroke must survive downsampling instead of disappearing between
+      // the 14/21/29 physical holes. Dark outlines get a slightly lower
+      // threshold than fills, while a small amount of antialiased color is
+      // retained when it is connected to the subject.
+      const coverage = occupied / area;
+      const color = dark / area >= .12 ? stroke : coverage >= .12 ? fill ?? stroke : undefined;
+      samples[(row + offsetY) * boardSize + col + offsetX] = color ? averageColor(color) : null;
     }
   }
   const sourceColors = imagePalette(samples);
@@ -191,6 +206,6 @@ export function imageToLevel(
   }).filter(color => used.has(color.id));
   return validateLevel({
     schemaVersion: 1, id, revision: 1, order: 1, title, themeId: 'personal',
-    width: cols, height: rows, palette, cells,
+    width: boardSize, height: boardSize, palette, cells,
   });
 }
