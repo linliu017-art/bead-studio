@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { validateLevel, validateCatalog } from '../assets/scripts/core/Level';
+import { formalLevelPaths } from '../assets/scripts/core/ThemeCatalog';
 import { checkPatternDetails } from './check-pattern-details';
 
 const args = process.argv.slice(2);
@@ -25,6 +26,9 @@ function readLevels(directory: string) {
 }
 const levels = readLevels('assets/resources/levels');
 validateCatalog(levels);
+if (levels.length !== formalLevelPaths.length || levels.some((level, index) => 'levels/' + level.id !== formalLevelPaths[index])) {
+  throw new Error('正式关卡目录与运行时资源路径不一致');
+}
 const samples = readLevels('assets/resources/samples');
 for (const sample of samples) {
   if (sample.palette.some(color => !sample.cells.includes(color.id))) {
